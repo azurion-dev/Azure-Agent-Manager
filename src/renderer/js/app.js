@@ -239,24 +239,55 @@
   $('#chat-search').oninput = () => renderChatList();
   $('#btn-new-chat').onclick = () => { if (!state.streaming) newChat(); };
 
+  // Keep welcome node alive so empty chats never go blank
+  let welcomeEl = $('#welcome');
+  if (welcomeEl && !welcomeEl._cloned) {
+    // stash a permanent clone template
+    state._welcomeHtml = welcomeEl.outerHTML;
+  }
+
+  function ensureWelcome(container) {
+    let welcome = container.querySelector('#welcome');
+    if (!welcome) {
+      if (state._welcomeHtml) {
+        container.insertAdjacentHTML('afterbegin', state._welcomeHtml);
+        welcome = container.querySelector('#welcome');
+        // re-bind suggestion clicks
+        welcome?.querySelectorAll('.suggestion').forEach(btn => {
+          btn.onclick = () => {
+            $('#input').value = btn.dataset.prompt;
+            autoResize();
+            updateSendBtn();
+            sendMessage();
+          };
+        });
+      }
+    }
+    return welcome;
+  }
+
   function renderMessages() {
     const chat = currentChat();
     const container = $('#messages');
-    const welcome = $('#welcome');
+    if (!container) return;
     state.lastBodyEl = null;
+
+    // Always stay on chat view when rendering messages
+    if (currentView !== 'chat') showView('chat');
 
     if (!chat || !chat.messages.length) {
       container.innerHTML = '';
-      if (welcome.parentNode !== container) container.appendChild(welcome);
-      welcome.classList.remove('hidden');
-      $('#session-pill').classList.add('hidden');
+      const welcome = ensureWelcome(container);
+      if (welcome) welcome.classList.remove('hidden');
+      $('#session-pill')?.classList.add('hidden');
       return;
     }
 
-    welcome.classList.add('hidden');
-    if (welcome.parentNode === container) container.removeChild(welcome);
-    $('#session-pill').classList.remove('hidden');
-    $('#session-name').textContent = chat.title || 'Session';
+    const welcome = container.querySelector('#welcome');
+    if (welcome) welcome.classList.add('hidden');
+
+    $('#session-pill')?.classList.remove('hidden');
+    if ($('#session-name')) $('#session-name').textContent = chat.title || 'Session';
 
     let html = '';
     for (const m of chat.messages) {
@@ -267,14 +298,19 @@
         const body = m.pending
           ? '<div class="typing-dots"><span></span><span></span><span></span></div>'
           : (m.cancelled && !m.content ? '<em>Generation cancelled</em>' : md(m.content || ''));
-        html += `<div class="msg ai${cancelled}"><div class="av">A</div><div class="col"><div class="body">${body}</div></div></div>`;
+        html += `<div class="msg ai${cancelled}"><div class="av">A</div><div class="col"><div class="body markdown-body">${body}</div></div></div>`;
       }
     }
-    container.innerHTML = html;
+    // Preserve welcome node if present
+    const keepWelcome = container.querySelector('#welcome');
+    container.innerHTML = (keepWelcome ? keepWelcome.outerHTML : '') + html;
+    const w2 = container.querySelector('#welcome');
+    if (w2) w2.classList.add('hidden');
     const bodies = container.querySelectorAll('.msg.ai .body');
     if (bodies.length) state.lastBodyEl = bodies[bodies.length - 1];
     container.scrollTop = container.scrollHeight;
   }
+
 
   function appendStreamChunk(text) {
     state.streamBuffer += text;
@@ -303,20 +339,65 @@
   }
 
   function md(text) {
-    let html = esc(text);
-    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
-      `<pre><code class="lang-${lang}">${code.trim()}</code></pre>`);
-    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+    if (!text) return '';
+    // Extract fenced code blocks first so inner markdown is not processed
+    const blocks = [];
+    let src = String(text).replace(/\r\n/g, '\n');
+    src = src.replace(/```([^\n`]*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+      const i = blocks.length;
+      const l = (lang || '').trim().split(/[:\s]/)[0];
+      blocks.push(`<pre class="md-pre"><code class="lang-${esc(l)}">${esc(code.replace(/\n$/, ''))}</code></pre>`);
+      return `\n\n%%CODEBLOCK_${i}%%\n\n`;
+    });
+
+    // Escape remaining text
+    let html = esc(src);
+
+    // Headings
+    html = html.replace(/^###### (.+)$/gm, '<h6>$1</h6>');
+    html = html.replace(/^##### (.+)$/gm, '<h5>$1</h5>');
+    html = html.replace(/^#### (.+)$/gm, '<h4>$1</h4>');
+    html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+    html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+    html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+
+    // HR
+    html = html.replace(/^(?:---|\*\*\*|___)\s*$/gm, '<hr>');
+
+    // Blockquotes
+    html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
+    html = html.replace(/(<\/blockquote>)\n(<blockquote>)/g, '\n');
+
+    // Ordered / unordered lists (simple)
+    html = html.replace(/^\d+\.\s+(.+)$/gm, '<li class="ol">$1</li>');
+    html = html.replace(/^[-*+]\s+(.+)$/gm, '<li class="ul">$1</li>');
+    // Wrap consecutive li
+    html = html.replace(/(<li class="ol">[\s\S]*?<\/li>)(?:\n<li class="ol">[\s\S]*?<\/li>)*/g, (m) =>
+      '<ol>' + m.replace(/ class="ol"/g, '') + '</ol>');
+    html = html.replace(/(<li class="ul">[\s\S]*?<\/li>)(?:\n<li class="ul">[\s\S]*?<\/li>)*/g, (m) =>
+      '<ul>' + m.replace(/ class="ul"/g, '') + '</ul>');
+
+    // Inline
+    html = html.replace(/`([^`\n]+)`/g, '<code>$1</code>');
     html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-    html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-    html = html.replace(/^[-*] (.+)$/gm, '<li>$1</li>');
-    html = html.replace(/(<li>[\s\S]*?<\/li>)/, '<ul>$1</ul>');
+    html = html.replace(/__(.+?)__/g, '<strong>$1</strong>');
+    html = html.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
+    html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+
+    // Paragraphs
     html = html.split(/\n\n+/).map(p => {
-      if (p.startsWith('<pre') || p.startsWith('<ul')) return p;
-      return `<p>${p.replace(/\n/g, '<br>')}</p>`;
-    }).join('');
+      const t = p.trim();
+      if (!t) return '';
+      if (/^%(?:%CODEBLOCK_\d+%%)/.test(t)) return t;
+      if (/^<(h[1-6]|ul|ol|pre|blockquote|hr|div)/i.test(t)) return t;
+      return `<p>${t.replace(/\n/g, '<br>')}</p>`;
+    }).join('\n');
+
+    // Restore code blocks
+    html = html.replace(/%%CODEBLOCK_(\d+)%%/g, (_, i) => blocks[Number(i)] || '');
     return html;
   }
+
 
   $$('.suggestion').forEach(btn => {
     btn.onclick = () => {
@@ -396,14 +477,34 @@
     if (state.currentProjectId) {
       const proj = state.projects.find(p => p.id === state.currentProjectId);
       if (proj) {
-        systemExtra = `\n\nYou are working inside project "${proj.name}" at "${proj.folder}". To edit a file, output:\n\`\`\`file-edit path="relative/path"\nfull new content\n\`\`\``;
+        systemExtra = `
+
+You are working inside the project "${proj.name}".
+Project root folder (absolute): ${proj.folder}
+
+When the user asks you to create, write, edit, or save a file you MUST apply the change by outputting ONE OR MORE of these blocks (not just example code):
+
+\`\`\`file-edit path="relative/path/from/project/root"
+full file contents here
+\`\`\`
+
+Rules:
+- Always use the file-edit fence so the app can write the file to disk.
+- path is relative to the project root unless absolute.
+- Put the complete file content inside the block.
+- You may still explain briefly in Markdown outside the block.
+- Prefer real working code over placeholders.`;
       }
     }
 
     const messages = [
-      { role: 'system', content: 'You are Azure Agent, a helpful AI assistant.' + systemExtra },
+      {
+        role: 'system',
+        content: 'You are Azure Agent, a helpful AI assistant. Prefer clear Markdown in replies (headings, lists, fenced code).' + systemExtra
+      },
       ...msgsForApi
     ];
+
 
     cleanupStreamListeners();
 
@@ -463,43 +564,89 @@
 
 
     const payload = { model, messages, options: { temperature: 0.7 } };
-    if (state.activeAgentUrl) payload.agentUrl = state.activeAgentUrl;
+    if (state.activeAgentUrl) {
+      payload.agentUrl = state.activeAgentUrl;
+      const agent = state.paired.find(a => a.url === state.activeAgentUrl);
+      payload.chargeTokens = agent?.requireTokens !== false;
+      if (agent?.maxCostPerMsg) payload.maxCostPerMsg = agent.maxCostPerMsg;
+    }
     await window.azure.chat(payload);
   }
 
+
   async function parseAndApplyEdits(content) {
-    const re = /```file-edit\s+path="([^"]+)"\n([\s\S]*?)```/g;
-    let match;
+    if (!content) return;
     const edits = [];
-    while ((match = re.exec(content)) !== null) {
-      edits.push({ path: match[1], content: match[2] });
+
+    // ```file-edit path="..."
+    const re1 = /```file-edit\s+path=["']([^"']+)["']\s*\n([\s\S]*?)```/gi;
+    let match;
+    while ((match = re1.exec(content)) !== null) {
+      edits.push({ path: match[1].trim(), content: match[2].replace(/\n$/, '') });
     }
-    if (!edits.length) return;
+
+    // ```file path=... or ```write path=...
+    const re2 = /```(?:file|write|create)(?:\s+path=["']?([^\s"'`]+)["']?)?\s*\n([\s\S]*?)```/gi;
+    while ((match = re2.exec(content)) !== null) {
+      if (match[1]) edits.push({ path: match[1].trim(), content: match[2].replace(/\n$/, '') });
+    }
+
+    // ```python:app.py or ```js:src/index.js
+    const re3 = /```([a-zA-Z0-9_+-]+):([^\s\n]+)\s*\n([\s\S]*?)```/g;
+    while ((match = re3.exec(content)) !== null) {
+      edits.push({ path: match[2].trim(), content: match[3].replace(/\n$/, '') });
+    }
+
+    // <!-- file: path --> ... ```
+    const re4 = /<!--\s*file:\s*([^\s>]+)\s*-->\s*```[^\n]*\n([\s\S]*?)```/gi;
+    while ((match = re4.exec(content)) !== null) {
+      edits.push({ path: match[1].trim(), content: match[2].replace(/\n$/, '') });
+    }
+
+    // Dedupe by path (last wins)
+    const byPath = new Map();
+    for (const e of edits) {
+      if (e.path && e.content != null) byPath.set(e.path.replace(/\\/g, '/'), e.content);
+    }
+    if (!byPath.size) return;
+
+    const proj = state.currentProjectId
+      ? state.projects.find(p => p.id === state.currentProjectId)
+      : null;
+
     const results = [];
-    for (const edit of edits) {
-      let fullPath = edit.path;
-      if (state.currentProjectId) {
-        const proj = state.projects.find(p => p.id === state.currentProjectId);
-        if (proj && !/^[A-Za-z]:/.test(edit.path) && !edit.path.startsWith('/')) {
-          fullPath = proj.folder.replace(/\\/g, '/') + '/' + edit.path.replace(/^\.\//, '');
-        }
+    for (const [relPath, fileContent] of byPath) {
+      let fullPath = relPath;
+      const isAbs = /^[A-Za-z]:[\\/]/.test(relPath) || relPath.startsWith('/');
+      if (!isAbs) {
+        if (!proj) continue; // relative paths need an active project
+        const root = proj.folder.replace(/[/\\]+$/, '');
+        fullPath = root + '\\' + relPath.replace(/\//g, '\\').replace(/^\.\\/, '');
       }
+      // Prefer native separators for Windows
+      if (fullPath.includes('/') && !fullPath.startsWith('/')) {
+        fullPath = fullPath.replace(/\//g, '\\');
+      }
+
       const existing = await window.azure.readFile(fullPath);
       const oldContent = existing.content || '';
-      const write = await window.azure.writeFile(fullPath, edit.content);
+      const write = await window.azure.writeFile(fullPath, fileContent);
       if (write.ok) {
-        const oldLines = oldContent.split('\n').length;
-        const newLines = edit.content.split('\n').length;
+        const oldLines = oldContent ? oldContent.split('\n').length : 0;
+        const newLines = fileContent.split('\n').length;
         results.push({
-          path: edit.path,
+          path: relPath,
           type: existing.error ? 'add' : 'mod',
           added: Math.max(0, newLines - oldLines),
           removed: Math.max(0, oldLines - newLines)
         });
+      } else {
+        console.error('write failed', fullPath, write.error);
       }
     }
     if (results.length) showDiffPanel(results);
   }
+
 
   function showDiffPanel(edits) {
     $('#diff-list').innerHTML = edits.map(e => `
@@ -601,12 +748,14 @@
   function updateAgentIndicator() {
     if (state.activeAgentUrl) {
       $('#context-info').textContent = 'Remote: ' + (state.activeAgentName || state.activeAgentUrl);
-      $('#agent-indicator').textContent = 'Tokens apply';
+      const agent = state.paired.find(a => a.url === state.activeAgentUrl);
+      $('#agent-indicator').textContent = agent?.requireTokens === false ? 'Free remote' : 'Tokens apply';
     } else {
       $('#context-info').textContent = 'Local agent';
       $('#agent-indicator').textContent = 'Free';
     }
   }
+
 
   function refreshLibrary() {
     const inst = $('#lib-installed');
@@ -810,10 +959,33 @@
     const port = await window.azure.getSetting('agentServerPort');
     if (name) $('#agent-name-input').value = name;
     if (port) $('#agent-port-input').value = port;
+    const reqTok = await window.azure.getSetting('agentRequireTokens');
+    const maxCost = await window.azure.getSetting('agentMaxCostPerMsg');
+    const maxChars = await window.azure.getSetting('agentMaxResponseChars');
+    if ($('#agent-require-tokens')) $('#agent-require-tokens').checked = reqTok !== false;
+    if ($('#agent-max-cost') && maxCost != null) $('#agent-max-cost').value = maxCost;
+    if ($('#agent-max-chars') && maxChars != null) $('#agent-max-chars').value = maxChars;
     state.paired = await window.azure.listPaired();
     renderPairedList();
     await refreshTokens();
   }
+
+  $('#btn-save-host-policy')?.addEventListener('click', async () => {
+    const name = $('#agent-name-input')?.value.trim();
+    const port = parseInt($('#agent-port-input')?.value, 10) || 7749;
+    if (name) await window.azure.setSetting('agentServerName', name);
+    await window.azure.setSetting('agentServerPort', port);
+    await window.azure.setSetting('agentRequireTokens', !!$('#agent-require-tokens')?.checked);
+    await window.azure.setSetting('agentMaxCostPerMsg', Math.max(1, Math.min(100, parseInt($('#agent-max-cost')?.value, 10) || 50)));
+    await window.azure.setSetting('agentMaxResponseChars', Math.max(1000, parseInt($('#agent-max-chars')?.value, 10) || 50000));
+    const st = $('#server-status');
+    if (st) {
+      const prev = st.textContent;
+      st.textContent = 'Policy saved';
+      st.className = 'status-text ok';
+      setTimeout(() => { st.textContent = prev; }, 1500);
+    }
+  });
 
   function renderPairedList() {
     const list = $('#paired-list');
@@ -823,15 +995,17 @@
     }
     list.innerHTML = state.paired.map(a => {
       const active = state.activeAgentUrl === a.url;
+      const tok = a.requireTokens === false ? 'Free' : ('Tokens · max ' + (a.maxCostPerMsg || 50) + '/msg');
       return `<div class="paired-item ${active ? 'active-agent' : ''}">
         <div class="info">
           <div class="name">${esc(a.name || 'Agent')}</div>
-          <div class="url">${esc(a.url)}</div>
+          <div class="url">${esc(a.url)} · ${esc(tok)}</div>
         </div>
         <button class="btn btn-secondary" data-use="${esc(a.id)}">${active ? 'Using' : 'Use'}</button>
         <button class="btn btn-ghost" data-rm="${esc(a.id)}">Remove</button>
       </div>`;
     }).join('');
+
     list.querySelectorAll('[data-use]').forEach(btn => {
       btn.onclick = async () => {
         const agent = state.paired.find(a => a.id === btn.dataset.use);
@@ -872,10 +1046,14 @@
       const port = parseInt($('#agent-port-input').value, 10) || 7749;
       if (name) await window.azure.setSetting('agentServerName', name);
       await window.azure.setSetting('agentServerPort', port);
+      await window.azure.setSetting('agentRequireTokens', !!$('#agent-require-tokens')?.checked);
+      await window.azure.setSetting('agentMaxCostPerMsg', Math.max(1, Math.min(100, parseInt($('#agent-max-cost')?.value, 10) || 50)));
+      await window.azure.setSetting('agentMaxResponseChars', Math.max(1000, parseInt($('#agent-max-chars')?.value, 10) || 50000));
       await window.azure.startAgentServer();
     }
     await refreshAgentsView();
   };
+
 
   let probedAgent = null;
   $('#btn-open-pair').onclick = () => {
@@ -904,7 +1082,15 @@
       box.innerHTML = '<strong>' + esc(res.name || 'Agent') + '</strong><br>Power: ' +
         res.power + '/10 · Regen: ' + res.regenRate + ' tokens/5min<br>Models: ' +
         ((res.models || []).slice(0, 5).map(esc).join(', ') || 'none');
-      probedAgent = { url, name: res.name, power: res.power, models: res.models };
+      probedAgent = {
+        url,
+        name: res.name,
+        power: res.power,
+        models: res.models,
+        requireTokens: res.requireTokens !== false,
+        maxCostPerMsg: res.maxCostPerMsg ?? 50,
+        regenRate: res.regenRate
+      };
       $('#pair-add').disabled = false;
     }
   };

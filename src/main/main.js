@@ -29,6 +29,10 @@ const store = new Store({
     agentServerEnabled: false,
     agentServerPort: 7749,
     agentServerName: os.hostname() || 'Azure Agent',
+    // Host policy for remote clients
+    agentRequireTokens: true,       // if false, remote clients use this host for free
+    agentMaxCostPerMsg: 50,         // max token cost charged per remote message (1–100)
+    agentMaxResponseChars: 50000,   // soft limit passed to clients as info
     // Tokens (client side when using remote agent)
     tokens: 100,
     tokenCap: 100,
@@ -37,6 +41,7 @@ const store = new Store({
     pairedAgents: []
   }
 });
+
 
 let mainWindow = null;
 let ollamaProcess = null;
@@ -192,7 +197,10 @@ function startAgentServer() {
         power: machinePowerScore(),
         regenRate: tokenRegenRate(),
         models: (models || []).map(m => m.name),
-        version: '1.1'
+        version: '1.1',
+        requireTokens: store.get('agentRequireTokens') !== false,
+        maxCostPerMsg: store.get('agentMaxCostPerMsg') ?? 50,
+        maxResponseChars: store.get('agentMaxResponseChars') ?? 50000
       }));
       return;
     }
@@ -204,6 +212,14 @@ function startAgentServer() {
       req.on('end', async () => {
         try {
           const payload = JSON.parse(body || '{}');
+          // Host policy: optional token requirement is informational for clients;
+          // max response can be hinted via options.num_predict
+          const opts = { ...(payload.options || {}) };
+          const maxChars = store.get('agentMaxResponseChars') ?? 50000;
+          if (maxChars > 0 && !opts.num_predict) {
+            // ~4 chars per token rough upper bound
+            opts.num_predict = Math.min(8192, Math.ceil(maxChars / 3));
+          }
           const ollamaUrl = store.get('ollamaUrl') || 'http://127.0.0.1:11434';
           const upstream = await fetch(`${ollamaUrl}/api/chat`, {
             method: 'POST',
@@ -212,7 +228,7 @@ function startAgentServer() {
               model: payload.model,
               messages: payload.messages,
               stream: true,
-              options: payload.options || {}
+              options: opts
             })
           });
           if (!upstream.ok) {
@@ -243,6 +259,7 @@ function startAgentServer() {
       });
       return;
     }
+
 
     // List models
     if (url.pathname === '/agent/models' && req.method === 'GET') {
@@ -565,26 +582,31 @@ ipcMain.handle('ollama:chat', async (event, payload) => {
   currentAbortController = new AbortController();
   const signal = currentAbortController.signal;
 
-  const { model, messages, options = {}, agentUrl } = payload;
+  const { model, messages, options = {}, agentUrl, chargeTokens, maxCostPerMsg } = payload;
   // agentUrl = remote paired agent base, e.g. http://192.168.1.10:7749
   const isRemote = !!(agentUrl && agentUrl.startsWith('http'));
+  // chargeTokens defaults true for remote unless host says free
+  const shouldCharge = isRemote && (chargeTokens !== false);
+  let reserved = 0;
 
-  // Token check for remote
-  if (isRemote) {
+  if (shouldCharge) {
     const tokens = regenClientTokens();
-    const cost = estimateTokenCost(
+    let cost = estimateTokenCost(
       messages.filter(m => m.role === 'user').slice(-1)[0]?.content || ''
     );
+    const cap = Math.max(1, Math.min(100, Number(maxCostPerMsg) || 50));
+    cost = Math.min(cost, cap);
     if (tokens < cost) {
       mainWindow?.webContents.send('ollama:chat-error', {
         error: `Not enough tokens (${tokens}/${cost}). Wait for regeneration.`
       });
       return { ok: false, error: 'insufficient_tokens', tokens, cost };
     }
-    // reserve minimum
+    reserved = cost;
     store.set('tokens', tokens - cost);
     mainWindow?.webContents.send('tokens:update', { tokens: tokens - cost });
   }
+
 
   const chatUrl = isRemote
     ? `${agentUrl.replace(/\/$/, '')}/agent/chat`
@@ -636,15 +658,14 @@ ipcMain.handle('ollama:chat', async (event, payload) => {
       }
     }
 
-    // Adjust tokens by real response size (remote only)
-    if (isRemote && fullContent) {
-      const fullCost = estimateTokenCost(
+    // Adjust tokens by real response size (remote + charging only)
+    if (shouldCharge && fullContent) {
+      const cap = Math.max(1, Math.min(100, Number(maxCostPerMsg) || 50));
+      let fullCost = estimateTokenCost(
         messages.filter(m => m.role === 'user').slice(-1)[0]?.content || '',
         fullContent.length
       );
-      const reserved = estimateTokenCost(
-        messages.filter(m => m.role === 'user').slice(-1)[0]?.content || ''
-      );
+      fullCost = Math.min(fullCost, cap);
       const extra = Math.max(0, fullCost - reserved);
       if (extra) {
         const cur = store.get('tokens') ?? 0;
@@ -652,6 +673,7 @@ ipcMain.handle('ollama:chat', async (event, payload) => {
         mainWindow?.webContents.send('tokens:update', { tokens: Math.max(0, cur - extra) });
       }
     }
+
 
     if (signal.aborted) {
       mainWindow?.webContents.send('ollama:chat-done', { content: fullContent, cancelled: true });
@@ -742,8 +764,12 @@ ipcMain.handle('agent:server-status', () => ({
   name: store.get('agentServerName'),
   ips: getLocalIPs(),
   power: machinePowerScore(),
-  regenRate: tokenRegenRate()
+  regenRate: tokenRegenRate(),
+  requireTokens: store.get('agentRequireTokens') !== false,
+  maxCostPerMsg: store.get('agentMaxCostPerMsg') ?? 50,
+  maxResponseChars: store.get('agentMaxResponseChars') ?? 50000
 }));
+
 
 ipcMain.handle('agent:probe', async (_e, baseUrl) => {
   try {
@@ -816,12 +842,17 @@ ipcMain.handle('fs:read-file', async (_e, filePath) => {
 });
 ipcMain.handle('fs:write-file', async (_e, filePath, content) => {
   try {
+    const dir = path.dirname(filePath);
+    if (dir && !fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
     fs.writeFileSync(filePath, content, 'utf-8');
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e.message };
   }
 });
+
 ipcMain.handle('fs:exists', (_e, p) => fs.existsSync(p));
 
 // Chats

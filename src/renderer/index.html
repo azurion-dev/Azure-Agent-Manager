@@ -330,10 +330,27 @@
               <label>Port</label>
               <input type="number" id="agent-port-input" value="7749" min="1024" max="65535">
             </div>
+            <div class="form-group">
+              <label class="check-label">
+                <input type="checkbox" id="agent-require-tokens" checked>
+                Require tokens from remote clients
+              </label>
+              <p class="hint" style="margin:6px 0 0">If off, anyone paired to this host can use your models without spending tokens.</p>
+            </div>
+            <div class="form-group">
+              <label>Max token cost per remote message (1–100)</label>
+              <input type="number" id="agent-max-cost" value="50" min="1" max="100">
+            </div>
+            <div class="form-group">
+              <label>Max response size (characters, soft limit)</label>
+              <input type="number" id="agent-max-chars" value="50000" min="1000" max="500000" step="1000">
+            </div>
+            <button class="btn btn-secondary" id="btn-save-host-policy">Save host policy</button>
           </section>
 
           <section class="settings-card">
             <h3>Paired remote agents</h3>
+
             <p class="hint">Connect to another Azure Agent Manager instance. Messages sent to a remote agent consume your tokens.</p>
             <button class="btn btn-secondary" id="btn-open-pair" style="margin-bottom:12px">+ Pair agent</button>
             <div id="paired-list"></div>
