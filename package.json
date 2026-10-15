@@ -1,15 +1,20 @@
 {
   "name": "azure-agent-manager",
-  "version": "1.1.0",
+  "version": "1.0.0",
   "description": "Azure Agent Manager — local & distributed AI agents with Ollama, projects, pairing and tokens",
   "main": "src/main/main.js",
-  "author": "Azure",
+  "author": "Azurion",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/azurion-dev/Azure-Agent-Manager.git"
+  },
   "scripts": {
     "start": "electron .",
     "dev": "electron . --enable-logging",
     "pack": "electron-builder --dir",
-    "dist": "electron-builder"
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win"
   },
   "dependencies": {
     "electron-store": "^8.2.0",
@@ -20,8 +25,9 @@
     "electron-builder": "^24.13.3"
   },
   "build": {
-    "appId": "com.azure.agentmanager",
+    "appId": "com.azurion.agentmanager",
     "productName": "Azure Agent Manager",
+    "copyright": "Copyright © Azurion",
     "directories": {
       "output": "dist"
     },
@@ -30,9 +36,32 @@
       "assets/**/*",
       "package.json"
     ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "azurion-dev",
+        "repo": "Azure-Agent-Manager"
+      }
+    ],
     "win": {
-      "target": "nsis",
-      "icon": "assets/app.ico"
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "assets/app.ico",
+      "artifactName": "AAM_WIN_amd64.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "assets/app.ico",
+      "uninstallerIcon": "assets/app.ico",
+      "installerHeaderIcon": "assets/app.ico",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Azure Agent Manager"
     },
     "mac": {
       "target": "dmg",

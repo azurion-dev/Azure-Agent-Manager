@@ -9,6 +9,33 @@ contextBridge.exposeInMainWorld('azure', {
   maximize: () => ipcRenderer.invoke('window:maximize'),
   close: () => ipcRenderer.invoke('window:close'),
   isMaximized: () => ipcRenderer.invoke('window:is-maximized'),
+  isWindowVisible: () => ipcRenderer.invoke('window:is-visible'),
+  notify: (title, body) => ipcRenderer.invoke('notify', { title, body }),
+  onTrayNewChat: (cb) => {
+    const h = () => cb();
+    ipcRenderer.on('tray:new-chat', h);
+    return () => ipcRenderer.removeListener('tray:new-chat', h);
+  },
+  onTrayCheckUpdate: (cb) => {
+    const h = () => cb();
+    ipcRenderer.on('tray:check-update', h);
+    return () => ipcRenderer.removeListener('tray:check-update', h);
+  },
+
+  // Auto-update
+
+  checkUpdate: () => ipcRenderer.invoke('update:check'),
+  downloadUpdate: (payload) => ipcRenderer.invoke('update:download', payload),
+  getPostUpdate: () => ipcRenderer.invoke('update:get-post-update'),
+  dismissUpdateNotes: () => ipcRenderer.invoke('update:dismiss-notes'),
+  skipVersion: (v) => ipcRenderer.invoke('update:skip-version', v),
+  getSkippedVersion: () => ipcRenderer.invoke('update:get-skipped'),
+  onUpdateProgress: (cb) => {
+    const h = (_e, d) => cb(d);
+    ipcRenderer.on('update:progress', h);
+    return () => ipcRenderer.removeListener('update:progress', h);
+  },
+
 
   isOllamaInstalled: () => ipcRenderer.invoke('ollama:is-installed'),
   isOllamaRunning: (url) => ipcRenderer.invoke('ollama:is-running', url),

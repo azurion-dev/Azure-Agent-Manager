@@ -132,15 +132,36 @@
     }
   };
 
+  let currentView = 'chat';
+
   function showView(name) {
+    // Clicking the same sidebar tab again returns to chat
+    if (name && name === currentView && name !== 'chat') {
+      name = 'chat';
+    }
+    currentView = name || 'chat';
     $$('.view').forEach(v => v.classList.remove('active'));
-    $(`#view-${name}`)?.classList.add('active');
-    $$('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.view === name));
-    if (name === 'library') refreshLibrary();
-    if (name === 'settings') loadSettingsForm();
-    if (name === 'agents') refreshAgentsView();
+    const el = $(`#view-${currentView}`);
+    if (el) {
+      el.classList.add('active');
+    } else {
+      currentView = 'chat';
+      $('#view-chat')?.classList.add('active');
+    }
+    $$('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.view === currentView));
+    if (currentView === 'library') refreshLibrary();
+    if (currentView === 'settings') loadSettingsForm();
+    if (currentView === 'agents') refreshAgentsView();
   }
-  $$('.nav-btn').forEach(btn => { btn.onclick = () => showView(btn.dataset.view); });
+
+  $$('.nav-btn').forEach(btn => {
+    btn.onclick = () => showView(btn.dataset.view);
+  });
+
+  // Brand / logo → always back to chat
+  document.querySelector('.titlebar-brand')?.addEventListener('click', () => showView('chat'));
+  // New chat already calls showView('chat') inside newChat()
+
 
   function genId() {
     return crypto.randomUUID ? crypto.randomUUID() :
@@ -411,6 +432,19 @@
       setStreaming(false);
       renderMessages();
       renderChatList();
+      // If UI is in tray / hidden, notify when the agent finishes
+      if (!data.cancelled) {
+        try {
+          const visible = await window.azure.isWindowVisible();
+          if (!visible) {
+            const preview = (data.content || '').replace(/\s+/g, ' ').slice(0, 120);
+            await window.azure.notify(
+              'Azure Agent Manager',
+              preview ? ('Agent finished: ' + preview + (preview.length >= 120 ? '…' : '')) : 'Your agent finished responding.'
+            );
+          }
+        } catch {}
+      }
     });
 
     state.unsubErr = window.azure.onChatError((data) => {
@@ -426,6 +460,7 @@
       setStreaming(false);
       renderMessages();
     });
+
 
     const payload = { model, messages, options: { temperature: 0.7 } };
     if (state.activeAgentUrl) payload.agentUrl = state.activeAgentUrl;
@@ -917,6 +952,142 @@
     }
   };
 
+  // ─── Auto-update UI ───────────────────────────────────────────
+  let pendingUpdate = null;
+  let updateBusy = false;
+
+  async function showPostUpdateIfNeeded() {
+    const res = await window.azure.getPostUpdate();
+    const notes = res?.notes;
+    const info = res?.info;
+    if (!notes && !info) return false;
+    const notesEl = $('#updated-notes');
+    const line = $('#updated-version-line');
+    if (notes?.body) {
+      notesEl.textContent = notes.body;
+      notesEl.classList.remove('hidden');
+    } else {
+      notesEl.textContent = 'Thanks for updating. Enjoy the latest improvements.';
+    }
+    if (info?.previousVersion && info?.currentVersion) {
+      line.textContent = `Updated from ${info.previousVersion} to ${info.currentVersion}.`;
+    } else if (notes?.version) {
+      line.textContent = `You are now on version ${notes.version}.`;
+    } else {
+      line.textContent = 'You are now on the latest version.';
+    }
+    $('#updated-modal').classList.remove('hidden');
+    return true;
+  }
+
+  $('#updated-ok')?.addEventListener('click', async () => {
+    await window.azure.dismissUpdateNotes();
+    $('#updated-modal').classList.add('hidden');
+  });
+
+  function showUpdateModal(data) {
+    pendingUpdate = data;
+    $('#upd-from').textContent = data.current || '?';
+    $('#upd-to').textContent = data.latest || '?';
+    $('#upd-notes').textContent = data.body || 'No release notes provided.';
+    $('#upd-download-area').classList.add('hidden');
+    $('#upd-hint').textContent = data.assetName
+      ? `Installer: ${data.assetName}`
+      : 'Installer package will be downloaded from GitHub Releases.';
+    $('#upd-offline').classList.add('hidden');
+    // Patch-only → allow "Update later"; minor/major force update
+    const later = $('#upd-later');
+    if (data.force) {
+      later.classList.add('hidden');
+    } else {
+      later.classList.remove('hidden');
+    }
+    $('#upd-actions').classList.remove('hidden');
+    $('#upd-now').disabled = false;
+    $('#update-modal').classList.remove('hidden');
+  }
+
+  function showOfflineUpdateHint() {
+    $('#upd-from').textContent = '?';
+    $('#upd-to').textContent = '?';
+    $('#upd-notes').textContent = 'Could not reach GitHub to check for updates.';
+    $('#upd-offline').classList.remove('hidden');
+    $('#upd-later').classList.remove('hidden');
+    $('#upd-later').textContent = 'OK';
+    $('#upd-now').classList.add('hidden');
+    $('#upd-actions').classList.remove('hidden');
+    $('#update-modal').classList.remove('hidden');
+  }
+
+  $('#upd-later')?.addEventListener('click', async () => {
+    if (pendingUpdate?.latest && !pendingUpdate.force) {
+      await window.azure.skipVersion(pendingUpdate.latest);
+    }
+    $('#update-modal').classList.add('hidden');
+    $('#upd-now').classList.remove('hidden');
+    $('#upd-later').textContent = 'Update later';
+    pendingUpdate = null;
+  });
+
+  $('#upd-now')?.addEventListener('click', async () => {
+    if (!pendingUpdate || updateBusy) return;
+    if (!pendingUpdate.downloadUrl) {
+      $('#upd-hint').textContent = 'No downloadable installer found on this release. Open the GitHub release page instead.';
+      if (pendingUpdate.htmlUrl) {
+        // cannot open from renderer easily — user sees message
+      }
+      return;
+    }
+    updateBusy = true;
+    $('#upd-actions').classList.add('hidden');
+    $('#upd-download-area').classList.remove('hidden');
+    $('#upd-progress-label').textContent = 'Downloading installer…';
+    $('#upd-bar').style.width = '0%';
+
+    const unsub = window.azure.onUpdateProgress((p) => {
+      const pct = p.percent || 0;
+      $('#upd-bar').style.width = pct + '%';
+      const mb = p.total ? (p.received / 1048576).toFixed(1) + ' / ' + (p.total / 1048576).toFixed(1) + ' MB' : '';
+      $('#upd-progress-label').textContent = `Downloading… ${pct}% ${mb}`;
+    });
+
+    const result = await window.azure.downloadUpdate({
+      downloadUrl: pendingUpdate.downloadUrl,
+      assetName: pendingUpdate.assetName || 'AAM_WIN_amd64.exe',
+      body: pendingUpdate.body,
+      latest: pendingUpdate.latest
+    });
+    unsub();
+    if (!result.ok) {
+      updateBusy = false;
+      $('#upd-actions').classList.remove('hidden');
+      $('#upd-hint').textContent = 'Download failed: ' + (result.error || 'unknown error');
+      $('#upd-progress-label').textContent = 'Failed';
+    } else {
+      $('#upd-progress-label').textContent = 'Starting installer… The app will close.';
+      $('#upd-bar').style.width = '100%';
+    }
+  });
+
+  async function runUpdateCheck() {
+    // Show post-update notes first (after a successful install)
+    const showedNotes = await showPostUpdateIfNeeded();
+    if (showedNotes) return;
+
+    const skipped = await window.azure.getSkippedVersion();
+    const result = await window.azure.checkUpdate();
+    if (!result.ok) {
+      if (result.offline) {
+        // silent if offline on routine check — only show if user expects it
+        // optional subtle: skip
+      }
+      return;
+    }
+    if (!result.updateAvailable) return;
+    if (skipped && skipped === result.latest && !result.force) return;
+    showUpdateModal(result);
+  }
+
   async function initApp() {
     const settings = await window.azure.getAllSettings();
     applyTheme(settings.theme || 'dark');
@@ -929,13 +1100,30 @@
     renderProjects();
     renderMessages();
     updateAgentIndicator();
+    // check updates after UI is ready
+    setTimeout(() => { runUpdateCheck(); }, 1200);
     setInterval(() => {
       if (!state.streaming) { loadModels(); refreshTokens(); }
     }, 45000);
+
+    // Tray menu actions
+    window.azure.onTrayNewChat?.(() => {
+      showView('chat');
+      if (!state.streaming) newChat();
+    });
+    window.azure.onTrayCheckUpdate?.(() => {
+      runUpdateCheck();
+    });
   }
+
 
   (async () => {
     const ok = await checkOllama();
     if (ok) await initApp();
+    else {
+      // still allow post-update dialog even if ollama missing
+      await showPostUpdateIfNeeded();
+    }
   })();
 })();
+

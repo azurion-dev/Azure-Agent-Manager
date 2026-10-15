@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, Tray, nativeImage, Notification } = require('electron');
 const path = require('path');
 const { spawn, exec } = require('child_process');
 const fs = require('fs');
@@ -6,6 +6,13 @@ const os = require('os');
 const http = require('http');
 const Store = require('electron-store');
 const { v4: uuidv4 } = require('uuid');
+const updater = require('./updater');
+
+// Keep running in tray when the window is closed
+let isQuitting = false;
+let tray = null;
+
+
 
 const store = new Store({
   name: 'azure-agent-settings',
@@ -331,8 +338,110 @@ function createWindow() {
     }, 400);
   });
 
+  // Close button → hide to tray (unless quitting)
+  mainWindow.on('close', (e) => {
+    if (!isQuitting) {
+      e.preventDefault();
+      mainWindow.hide();
+      if (tray && process.platform === 'win32') {
+        // optional: first-time balloon could go here
+      }
+    }
+  });
+
   Menu.setApplicationMenu(null);
 }
+
+function getTrayIcon() {
+  const iconPath = resolveAppIcon();
+  if (iconPath) {
+    let img = nativeImage.createFromPath(iconPath);
+    if (!img.isEmpty()) {
+      // Windows tray looks best around 16–32px
+      if (process.platform === 'win32') {
+        img = img.resize({ width: 16, height: 16 });
+      } else if (process.platform === 'darwin') {
+        img = img.resize({ width: 18, height: 18 });
+      } else {
+        img = img.resize({ width: 24, height: 24 });
+      }
+      return img;
+    }
+  }
+  // fallback: simple green pixel
+  return nativeImage.createFromDataURL(
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAFElEQVQ4T2Nk+M9Qz0BFwDAajzAaAwA0+gP9mQ3f9QAAAABJRU5ErkJggg=='
+  );
+}
+
+function showMainWindow() {
+  if (!mainWindow) {
+    createWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function createTray() {
+  if (tray) return;
+  tray = new Tray(getTrayIcon());
+  tray.setToolTip('Azure Agent Manager');
+
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: 'Azure Agent Manager',
+      icon: (() => {
+        try {
+          const p = resolveAppIcon();
+          if (!p) return undefined;
+          return nativeImage.createFromPath(p).resize({ width: 16, height: 16 });
+        } catch { return undefined; }
+      })(),
+      enabled: false
+    },
+    { type: 'separator' },
+    {
+      label: 'Open UI',
+      click: () => showMainWindow()
+    },
+    {
+      label: 'New chat',
+      click: () => {
+        showMainWindow();
+        mainWindow?.webContents.send('tray:new-chat');
+      }
+    },
+    { type: 'separator' },
+    {
+      label: 'Check for updates',
+      click: () => {
+        showMainWindow();
+        mainWindow?.webContents.send('tray:check-update');
+      }
+    },
+    { type: 'separator' },
+    {
+      label: 'Quit',
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      }
+    }
+  ]);
+
+  tray.setContextMenu(contextMenu);
+  tray.on('double-click', () => showMainWindow());
+  tray.on('click', () => {
+    // Windows: single click toggles
+    if (process.platform === 'win32') {
+      if (mainWindow?.isVisible()) mainWindow.hide();
+      else showMainWindow();
+    }
+  });
+}
+
 
 // ─── IPC ──────────────────────────────────────────────────────────
 ipcMain.handle('app:get-version', () => app.getVersion());
@@ -351,8 +460,26 @@ ipcMain.handle('window:maximize', () => {
   if (mainWindow?.isMaximized()) mainWindow.unmaximize();
   else mainWindow?.maximize();
 });
-ipcMain.handle('window:close', () => mainWindow?.close());
+// X button → hide to tray (same as window close handler)
+ipcMain.handle('window:close', () => {
+  if (mainWindow) mainWindow.hide();
+});
 ipcMain.handle('window:is-maximized', () => mainWindow?.isMaximized() ?? false);
+ipcMain.handle('window:is-visible', () => !!(mainWindow && mainWindow.isVisible() && !mainWindow.isMinimized()));
+
+// Desktop notification (e.g. agent finished while UI hidden)
+ipcMain.handle('notify', (_e, { title, body }) => {
+  if (!Notification.isSupported()) return false;
+  const n = new Notification({
+    title: title || 'Azure Agent Manager',
+    body: body || '',
+    icon: resolveAppIcon() || undefined
+  });
+  n.on('click', () => showMainWindow());
+  n.show();
+  return true;
+});
+
 
 ipcMain.handle('ollama:is-installed', () => isOllamaInstalled());
 ipcMain.handle('ollama:is-running', (_e, url) => isOllamaRunning(url));
@@ -556,6 +683,41 @@ ipcMain.handle('ollama:cancel', () => {
 ipcMain.handle('settings:get', (_e, key) => (key ? store.get(key) : store.store));
 ipcMain.handle('settings:set', (_e, key, value) => { store.set(key, value); return true; });
 
+// ─── Auto-update (GitHub Releases) ───────────────────────────────
+ipcMain.handle('update:check', async () => {
+  return updater.checkForUpdate(app.getVersion());
+});
+ipcMain.handle('update:download', async (event, { downloadUrl, assetName, body, latest }) => {
+  try {
+    if (body) updater.saveLastChangelog(store, body, latest);
+    const result = await updater.downloadAndInstall(
+      downloadUrl,
+      assetName || 'AAM_WIN_amd64.exe',
+      (progress) => {
+        mainWindow?.webContents.send('update:progress', progress);
+      }
+    );
+    return result;
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+ipcMain.handle('update:get-post-update', () => {
+  const info = updater.consumePostUpdateMarker(store);
+  const notes = store.get('lastUpdateNotes') || null;
+  return { info, notes };
+});
+ipcMain.handle('update:dismiss-notes', () => {
+  store.delete('lastUpdateNotes');
+  return true;
+});
+ipcMain.handle('update:skip-version', (_e, version) => {
+  store.set('skippedVersion', version);
+  return true;
+});
+ipcMain.handle('update:get-skipped', () => store.get('skippedVersion') || null);
+
+
 // Tokens
 ipcMain.handle('tokens:get', () => {
   const tokens = regenClientTokens();
@@ -670,16 +832,26 @@ ipcMain.handle('chats:get', (_e, id) => (store.get('chats') || []).find(c => c.i
 // App lifecycle
 app.whenReady().then(async () => {
   createWindow();
+  createTray();
   // auto-restart agent server if it was enabled
   if (store.get('agentServerEnabled')) {
     try { startAgentServer(); } catch (e) { console.error(e); }
   }
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    else showMainWindow();
   });
 });
 
-app.on('window-all-closed', () => {
-  stopAgentServer();
-  if (process.platform !== 'darwin') app.quit();
+// Do not quit when window is hidden to tray
+app.on('window-all-closed', (e) => {
+  // keep process alive for tray
+  if (process.platform === 'darwin') return;
+  // prevent default quit — tray holds the app
 });
+
+app.on('before-quit', () => {
+  isQuitting = true;
+  stopAgentServer();
+});
+

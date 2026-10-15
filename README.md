@@ -1,29 +1,47 @@
 # Azure Agent Manager
 
-Local-first AI desktop app (Electron + Ollama) with projects, remote agent pairing, and tokens.
+Local-first AI desktop app (Electron + Ollama) by **Azurion**.
 
-## v1.1
+Green UI · projects · remote agent pairing · tokens · auto-update from GitHub Releases.
 
-- Renamed to **Azure Agent Manager**
-- **Cancel generation** while streaming
-- Smoother streaming (batched DOM updates, debounced saves)
-- **Agents & Pairing**: host this PC or connect to another by IP
-- **Tokens**: used only for remote agents; regen every 5 min by host power
-- Updated icons (library / network / gear)
-- Token badge in the title bar
+## Repository
 
-## Run
+https://github.com/azurion-dev/Azure-Agent-Manager
+
+## Run (dev)
 
 ```bash
 npm install
 npm start
 ```
 
-## Pairing
+## Build Windows installer
 
-1. Host: Agents → Start agent server → share IP (e.g. http://192.168.1.20:7749)
-2. Client: Pair agent → Test → Pair → Use
-3. Remote chats spend tokens; local is free
+```bash
+npm run dist:win
+```
+
+Output: `dist/AAM_WIN_amd64.exe` — attach this file to a GitHub Release.
+
+### Releases
+
+1. Bump `"version"` in `package.json`
+2. `npm run dist:win`
+3. GitHub Release tag e.g. `v1.0.1` + attach `AAM_WIN_amd64.exe`
+4. Write release notes (shown in-app)
+
+### Update rules
+
+| Change | Example | Update later |
+|--------|---------|--------------|
+| Patch | 1.0.0 → 1.0.1 | Yes |
+| Minor/major | 1.0.0 → 1.1.0 | No (forced) |
+
+Update now downloads the installer, launches it, quits the app. Next open shows the “was updated” dialog with notes.
+
+## Icons
+
+`assets/app.png` and `assets/app.ico`
 
 ## License
 

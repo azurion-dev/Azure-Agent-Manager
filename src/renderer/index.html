@@ -64,8 +64,59 @@
     </div>
   </div>
 
+  <!-- Update available modal -->
+  <div id="update-modal" class="modal hidden">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card update-card">
+      <div class="modal-icon" style="text-align:center">
+        <img src="../../assets/app.png" alt="" style="width:48px;height:48px;border-radius:12px;object-fit:contain" onerror="this.style.display='none'">
+      </div>
+      <h2>Update available</h2>
+      <div class="version-jump">
+        <span class="from" id="upd-from">1.0.0</span>
+        <span class="arrow">→</span>
+        <span class="to" id="upd-to">1.0.1</span>
+      </div>
+      <div id="upd-offline" class="offline-banner hidden">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 1l22 22M16.72 11.06A10.94 10.94 0 0 1 19 12.55M5 12.55a10.94 10.94 0 0 1 5.17-2.39M10.71 5.05A16 16 0 0 1 22.56 9M1.42 9a15.91 15.91 0 0 1 4.7-2.88M8.53 16.11a6 6 0 0 1 6.95 0M12 20h.01"/></svg>
+        <span>No internet connection. Connect to Wi‑Fi or Ethernet to download the update.</span>
+      </div>
+      <div class="update-notes" id="upd-notes"></div>
+      <div id="upd-download-area" class="hidden">
+        <div class="update-progress-wrap">
+          <div class="bar"><div id="upd-bar"></div></div>
+          <div class="update-progress-label" id="upd-progress-label">Downloading…</div>
+        </div>
+      </div>
+      <div class="modal-actions" id="upd-actions">
+        <button class="btn btn-ghost" id="upd-later">Update later</button>
+        <button class="btn btn-primary" id="upd-now">Update now</button>
+      </div>
+      <p class="modal-hint" id="upd-hint"></p>
+    </div>
+  </div>
+
+  <!-- Just updated / changelog modal -->
+  <div id="updated-modal" class="modal hidden">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card update-card">
+      <div class="modal-icon" style="text-align:center;color:var(--success)">
+        <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+          <circle cx="12" cy="12" r="10"/><path d="M9 12l2 2 4-4"/>
+        </svg>
+      </div>
+      <h2>Azure Agent Manager was updated</h2>
+      <p id="updated-version-line" style="text-align:center;color:var(--mu);margin-bottom:12px">You are now on the latest version.</p>
+      <div class="update-notes" id="updated-notes"></div>
+      <div class="modal-actions">
+        <button class="btn btn-primary" id="updated-ok">OK</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Create Project Modal -->
   <div id="project-modal" class="modal hidden">
+
     <div class="modal-backdrop"></div>
     <div class="modal-card wide">
       <h2>New Project</h2>
