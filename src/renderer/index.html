@@ -47,13 +47,21 @@
     <div class="modal-backdrop"></div>
     <div class="modal-card">
       <div class="modal-icon warn">
-        <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-          <path d="M12 9v4M12 17h.01"/><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+        <svg xmlns="http://www.w3.org/2000/svg" width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/>
+          <path d="M12 9v4"/>
+          <path d="M12 17h.01"/>
         </svg>
       </div>
       <h2>Ollama is not installed</h2>
-      <p>Azure Agent Manager needs Ollama to run local models. Install it now?</p>
-      <div class="modal-actions">
+      <p>Azure Agent Manager needs Ollama to run local models. Install it now? The download runs in the background — no PowerShell window.</p>
+      <div id="ollama-progress-area" class="ollama-progress-area hidden">
+        <div class="update-progress-wrap">
+          <div class="bar"><div id="ollama-bar"></div></div>
+          <div class="update-progress-label"><span id="ollama-pct">0%</span> · <span id="ollama-progress-label">Preparing…</span></div>
+        </div>
+      </div>
+      <div class="modal-actions" id="ollama-actions">
         <button class="btn btn-ghost" id="ollama-cancel">Cancel</button>
         <button class="btn btn-primary" id="ollama-install">
           <span class="btn-label">Install Ollama</span>
@@ -63,6 +71,7 @@
       <p class="modal-hint" id="ollama-hint"></p>
     </div>
   </div>
+
 
   <!-- Update available modal -->
   <div id="update-modal" class="modal hidden">
@@ -188,22 +197,25 @@
 
       <div class="sidebar-footer">
         <button class="nav-btn" data-view="library" title="Model Library">
-          <!-- layers / library icon -->
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+          <!-- book -->
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20"/></svg>
         </button>
-        <button class="nav-btn" data-view="agents" title="Agents & Pairing">
-          <!-- network / nodes -->
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="5" cy="6" r="2.5"/><circle cx="19" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M7.2 7.5l3.5 8M16.8 7.5l-3.5 8M7.5 6h9"/></svg>
+        <button class="nav-btn" data-view="agents" title="Agents & Pairing" id="nav-agents">
+          <!-- database status icon (updated live) -->
+          <span id="nav-agents-icon" class="nav-icon-wrap">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></svg>
+          </span>
         </button>
         <button class="nav-btn" data-view="settings" title="Settings">
-          <!-- gear -->
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <!-- settings gear -->
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/></svg>
         </button>
         <div class="user-pill">
           <div class="avatar">A</div>
           <span>Local</span>
         </div>
       </div>
+
     </aside>
 
     <main id="main">
@@ -378,11 +390,19 @@
             </div>
             <button class="btn btn-secondary" id="btn-save-tokens">Save token settings</button>
           </section>
+
+          <section class="settings-card">
+            <h3>Long-term memory <span id="memory-count" class="badge-count">0</span></h3>
+            <p class="hint">The agent remembers important details across chats (and across sessions). On a remote host, memory is stored on that host. Clear anytime.</p>
+            <div id="memory-list" class="memory-list"></div>
+            <button class="btn btn-secondary" id="btn-clear-memory" style="margin-top:12px">Clear memory</button>
+          </section>
         </div>
       </div>
 
       <!-- Settings View -->
       <div id="view-settings" class="view">
+
         <div class="view-header"><h2>Settings</h2></div>
         <div class="settings-sections">
           <section class="settings-card">

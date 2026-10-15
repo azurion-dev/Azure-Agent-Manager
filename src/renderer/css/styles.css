@@ -1082,3 +1082,62 @@ input:focus, textarea:focus, select:focus { border-color: var(--ac); }
 
 #upd-notes { max-height: 220px; overflow-y: auto; }
 #upd-notes .markdown-body { font-size: 13px; }
+
+.memory-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.memory-item {
+  font-size: 12.5px;
+  line-height: 1.4;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--bg2);
+  border: 1px solid var(--bd);
+  color: var(--tx);
+}
+.badge-count {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--bg3);
+  border: 1px solid var(--bd);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--mu);
+  vertical-align: middle;
+}
+.hci-mem {
+  font-size: 11px;
+  color: var(--mu);
+  min-width: 42px;
+}
+
+.ollama-progress-area { margin: 14px 0 4px; }
+.ollama-progress-area .bar {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--bg3);
+  overflow: hidden;
+  border: 1px solid var(--bd);
+}
+.ollama-progress-area .bar > div {
+  height: 100%;
+  width: 0%;
+  background: var(--grad, linear-gradient(90deg, #16a34a, #22c55e));
+  transition: width 0.25s ease;
+  border-radius: 999px;
+}
+.nav-icon-wrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.nav-icon-wrap[data-status="active"] { color: var(--ac); }
+.nav-icon-wrap[data-status="offline"] { color: #f87171; }
+.nav-icon-wrap[data-status="limited"] { color: #fbbf24; }
+.nav-icon-wrap[data-status="fast"] { color: #34d399; }

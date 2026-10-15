@@ -7,7 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.3.0] — 2026-10-15
+
+Long-term memory across chats, silent Ollama install with in-app progress, status icons, and single-instance lock.
+
+### Added
+- **Long-term memory** across chats (facts from past prompts injected into the system prompt)
+- Memory stored **locally**, or **on the host per device** when using a remote agent
+- **Clear memory** in Agents; host can **Clear mem** per connected device
+- In-chat history kept (recent turns) so follow-ups like “add division” stay in context
+- **Ollama install progress UI** (% bar + status) — no visible PowerShell window
+- Silent Windows install via `OllamaSetup.exe` (`/VERYSILENT`), with install.ps1 fallback
+- **Agent status icons** (database variants): idle, offline, limited, fast, active/generating
+- Sidebar icons refreshed: **book** (library), **settings**, **triangle-alert** (Ollama modal)
+- **Single-instance lock**: second launch focuses the existing window instead of opening another
+
+### Fixed
+- Ollama installer opening an empty PowerShell and appearing stuck
+- Broken / incomplete sidebar and modal icons
+
+### Changed
+- Install flow runs fully in the background and reports progress to the renderer
+
+---
+
+## [1.2.0] — 2026-10-14
+
+Host-authoritative tokens, connected-devices panel, richer Markdown, project file writes, tray polish, and UI zoom.
+
+
+### Added
+- **Host-side token balances** per client `deviceId` (stored on the host, not the client)
+- Host API: `/agent/register`, `/agent/balance`; chat charges tokens only when the host requires them
+- **Connected devices** panel (Agents): list devices, chat counts, last preview, grant **+10 / +50**, reset balance
+- Host policy: require tokens on/off, max cost per message, max response size
+- **Token warning** under the composer when the host balance is too low (blocks send)
+- Live policy refresh before each remote send and when selecting a paired agent
+- **UI zoom**: `Ctrl`/`Cmd` + `+` / `-` / `0`, and `Ctrl` + mouse wheel (persisted)
+- Stronger project system prompt + multiple **file-edit** formats (`file-edit`, `lang:path`, etc.)
+- `writeFile` creates parent directories; edited-files panel on successful writes
+- Improved **Markdown** in chat (headings, lists, quotes, links, fenced code)
+- Update modal release notes rendered as Markdown
+- System tray: hide on close, context menu (Open UI, New chat, Check for updates, Quit), notification when a reply finishes while hidden
+- Click active sidebar tab or title-bar brand to return to chat
+
+### Fixed
+- Remote still consuming local tokens after host disabled “Require tokens”
+- Empty / black chat view after switching sessions (welcome node lost from DOM)
+- Models answering with sample code instead of writing project files (prompt + parsers)
+
+### Changed
+- Client no longer deducts remote tokens locally; host is authoritative
+- Token badge reflects host balance when a remote agent is active
+
+---
+
 ## [1.0.0] — 2026-10-14
+
 
 Initial public release of **Azure Agent Manager** — a fully local-first Electron desktop app for chatting with Ollama models, managing projects, pairing remote agents, and updating from GitHub Releases.
 

@@ -52,11 +52,17 @@ contextBridge.exposeInMainWorld('azure', {
     ipcRenderer.on('ollama:pull-progress', h);
     return () => ipcRenderer.removeListener('ollama:pull-progress', h);
   },
+  onInstallProgress: (cb) => {
+    const h = (_e, d) => cb(d);
+    ipcRenderer.on('ollama:install-progress', h);
+    return () => ipcRenderer.removeListener('ollama:install-progress', h);
+  },
   onChatChunk: (cb) => {
     const h = (_e, d) => cb(d);
     ipcRenderer.on('ollama:chat-chunk', h);
     return () => ipcRenderer.removeListener('ollama:chat-chunk', h);
   },
+
   onChatDone: (cb) => {
     const h = (_e, d) => cb(d);
     ipcRenderer.on('ollama:chat-done', h);
@@ -90,13 +96,19 @@ contextBridge.exposeInMainWorld('azure', {
   listAgentClients: () => ipcRenderer.invoke('agent:list-clients'),
   grantClientTokens: (deviceId, amount) => ipcRenderer.invoke('agent:grant-tokens', { deviceId, amount }),
   setClientTokens: (deviceId, tokens) => ipcRenderer.invoke('agent:set-client-tokens', { deviceId, tokens }),
+  clearClientMemory: (deviceId) => ipcRenderer.invoke('agent:clear-client-memory', deviceId),
   remoteBalance: (url) => ipcRenderer.invoke('agent:remote-balance', url),
+  remoteMemory: (baseUrl, action, fact) => ipcRenderer.invoke('agent:remote-memory', { baseUrl, action, fact }),
   getDeviceId: () => ipcRenderer.invoke('device:get-id'),
   getDeviceName: () => ipcRenderer.invoke('device:get-name'),
   setDeviceName: (name) => ipcRenderer.invoke('device:set-name', name),
-
+  listMemory: () => ipcRenderer.invoke('memory:list'),
+  clearMemory: () => ipcRenderer.invoke('memory:clear'),
+  addMemory: (fact) => ipcRenderer.invoke('memory:add', fact),
+  setMemory: (list) => ipcRenderer.invoke('memory:set', list),
 
   createProject: (data) => ipcRenderer.invoke('project:create', data),
+
   listProjects: () => ipcRenderer.invoke('project:list'),
   deleteProject: (id) => ipcRenderer.invoke('project:delete', id),
   pickFolder: () => ipcRenderer.invoke('project:pick-folder'),

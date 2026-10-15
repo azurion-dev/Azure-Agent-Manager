@@ -116,21 +116,41 @@
     btn.querySelector('.btn-label').classList.add('hidden');
     btn.querySelector('.btn-spinner').classList.remove('hidden');
     btn.disabled = true;
-    $('#ollama-hint').textContent = 'Downloading and installing Ollama…';
+    $('#ollama-cancel').disabled = true;
+    $('#ollama-progress-area')?.classList.remove('hidden');
+    $('#ollama-hint').textContent = 'Installing in the background (no PowerShell window)…';
+    $('#ollama-bar').style.width = '2%';
+    $('#ollama-pct').textContent = '2%';
+    $('#ollama-progress-label').textContent = 'Starting…';
+
+    const unsub = window.azure.onInstallProgress?.((d) => {
+      const pct = typeof d.percent === 'number' ? d.percent : 0;
+      if ($('#ollama-bar')) $('#ollama-bar').style.width = pct + '%';
+      if ($('#ollama-pct')) $('#ollama-pct').textContent = pct + '%';
+      if ($('#ollama-progress-label')) $('#ollama-progress-label').textContent = d.label || 'Installing…';
+    });
+
     const result = await window.azure.installOllama();
+    try { unsub?.(); } catch {}
+
     if (result.ok) {
-      $('#ollama-hint').textContent = 'Installed! Starting…';
-      setTimeout(() => {
+      if ($('#ollama-bar')) $('#ollama-bar').style.width = '100%';
+      if ($('#ollama-pct')) $('#ollama-pct').textContent = '100%';
+      $('#ollama-hint').textContent = 'Installed! Starting Ollama…';
+      setTimeout(async () => {
         $('#ollama-modal').classList.add('hidden');
+        await window.azure.startOllama();
         initApp();
-      }, 1000);
+      }, 800);
     } else {
-      $('#ollama-hint').textContent = result.message || 'Install failed.';
+      $('#ollama-hint').textContent = result.message || 'Install failed. Check your internet and try again.';
       btn.querySelector('.btn-label').classList.remove('hidden');
       btn.querySelector('.btn-spinner').classList.add('hidden');
       btn.disabled = false;
+      $('#ollama-cancel').disabled = false;
     }
   };
+
 
   let currentView = 'chat';
 
@@ -449,7 +469,9 @@
     state.streaming = on;
     updateSendBtn();
     inputEl.disabled = on;
+    updateAgentIndicator();
   }
+
 
   function cleanupStreamListeners() {
     if (state.unsubChunk) { state.unsubChunk(); state.unsubChunk = null; }
@@ -519,6 +541,13 @@
       if (m.role === 'assistant' && !m.content) continue;
       msgsForApi.push({ role: m.role, content: m.content });
     }
+    // Keep recent turns if history is very long (memory still carries older context)
+    const MAX_TURNS = 48;
+    const trimmedMsgs = msgsForApi.length > MAX_TURNS ? msgsForApi.slice(-MAX_TURNS) : msgsForApi;
+
+    // Long-term memory (local or host when remote)
+    let memoryFacts = await loadMemoryFacts();
+    const memoryBlock = formatMemoryBlock(memoryFacts);
 
     let systemExtra = '';
     if (state.currentProjectId) {
@@ -547,10 +576,16 @@ Rules:
     const messages = [
       {
         role: 'system',
-        content: 'You are Azure Agent, a helpful AI assistant. Prefer clear Markdown in replies (headings, lists, fenced code).' + systemExtra
+        content:
+          'You are Azure Agent, a helpful AI assistant. Prefer clear Markdown in replies (headings, lists, fenced code).\n' +
+          'Use the conversation history in this chat AND the long-term memory below to stay consistent across sessions. ' +
+          'If the user refers to earlier work (code, files, decisions), continue from that context instead of starting over.' +
+          systemExtra +
+          memoryBlock
       },
-      ...msgsForApi
+      ...trimmedMsgs
     ];
+
 
 
     cleanupStreamListeners();
@@ -576,6 +611,11 @@ Rules:
         }
         if (!data.cancelled) parseAndApplyEdits(last?.content || '');
         await window.azure.saveChats(state.chats);
+        // Update long-term memory from this exchange
+        if (!data.cancelled) {
+          const userMsg = [...(c?.messages || [])].reverse().find(m => m.role === 'user');
+          await rememberExchange(userMsg?.content || '', last?.content || '', c?.id);
+        }
       }
       setStreaming(false);
       renderMessages();
@@ -594,6 +634,7 @@ Rules:
         } catch {}
       }
     });
+
 
     state.unsubErr = window.azure.onChatError((data) => {
       cleanupStreamListeners();
@@ -794,16 +835,45 @@ Rules:
     updateAgentIndicator();
   }
 
+  // Remote/agent status icons (database variants)
+  const AGENT_ICONS = {
+    idle: '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></svg>',
+    offline: '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m17 17 5 5"/><path d="M19.323 13.744A9 3 0 0 0 21 12"/><path d="M21 13.127V5"/><path d="m22 17-5 5"/><path d="M3 12A9 3 0 0 0 13.563 14.954"/><path d="M3 5V19A9 3 0 0 0 13 21.981"/><ellipse cx="12" cy="5" rx="9" ry="3"/></svg>',
+    limited: '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15V5"/><path d="M22 19h-6"/><path d="M3 12A9 3 0 0 0 21 12"/><path d="M3 5V19A9 3 0 0 0 13.318 21.968"/><ellipse cx="12" cy="5" rx="9" ry="3"/></svg>',
+    fast: '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 22v-6"/><path d="M21 12.536V5"/><path d="m22 19-3-3-3 3"/><path d="M3 12A9 3 0 0 0 14.457 14.886"/><path d="M3 5V19A9 3 0 0 0 13.318 21.968"/><ellipse cx="12" cy="5" rx="9" ry="3"/></svg>',
+    active: '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 15 21.84"/><path d="M21 5V8"/><path d="M21 12L18 17H22L19 22"/><path d="M3 12A9 3 0 0 0 14.59 14.87"/></svg>'
+  };
+
+  function setAgentNavIcon(kind) {
+    const el = $('#nav-agents-icon');
+    if (!el) return;
+    el.innerHTML = AGENT_ICONS[kind] || AGENT_ICONS.idle;
+    el.dataset.status = kind;
+    el.title = ({
+      idle: 'Agent idle',
+      offline: 'Remote offline',
+      limited: 'High load / limited',
+      fast: 'Low load / ready',
+      active: 'Generating…'
+    })[kind] || '';
+  }
+
   function updateAgentIndicator() {
     if (state.activeAgentUrl) {
       $('#context-info').textContent = 'Remote: ' + (state.activeAgentName || state.activeAgentUrl);
       const agent = state.paired.find(a => a.url === state.activeAgentUrl);
       $('#agent-indicator').textContent = agent?.requireTokens === false ? 'Free remote' : 'Tokens apply';
+      if (state.streaming) setAgentNavIcon('active');
+      else if (state.tokenBlocked) setAgentNavIcon('limited');
+      else if (agent?.requireTokens === false) setAgentNavIcon('fast');
+      else setAgentNavIcon('idle');
     } else {
       $('#context-info').textContent = 'Local agent';
       $('#agent-indicator').textContent = 'Free';
+      setAgentNavIcon(state.streaming ? 'active' : 'idle');
     }
   }
+
 
 
   function refreshLibrary() {
@@ -955,9 +1025,79 @@ Rules:
     $('#session-name').textContent = 'Project: ' + name;
   };
 
+  async function loadMemoryFacts() {
+    if (state.activeAgentUrl) {
+      const res = await window.azure.remoteMemory(state.activeAgentUrl, 'list');
+      if (!res.error && Array.isArray(res.memory)) return res.memory;
+    }
+    return (await window.azure.listMemory()) || [];
+  }
+
+  function formatMemoryBlock(facts) {
+    if (!facts?.length) return '';
+    const lines = facts.slice(0, 30).map(f => `- ${f.text}`).join('\n');
+    return `\n\n## Long-term memory (from earlier chats — treat as true context)\n${lines}\n`;
+  }
+
+  function summarizeForMemory(userText, assistantText) {
+    const u = String(userText || '').replace(/\s+/g, ' ').trim();
+    if (u.length < 8) return null;
+    // Prefer user intent; light assist from first line of reply
+    let fact = u.slice(0, 220);
+    if (/```/.test(assistantText || '') || /\b(function|class|def |import |const |let )/i.test(assistantText || '')) {
+      fact = `User is working on code: ${fact}`;
+    } else if (/\b(file|project|folder|app\.py|create|edit)\b/i.test(u)) {
+      fact = `User project/task: ${fact}`;
+    } else {
+      fact = `User said: ${fact}`;
+    }
+    return fact;
+  }
+
+  async function rememberExchange(userText, assistantText, chatId) {
+    const text = summarizeForMemory(userText, assistantText);
+    if (!text) return;
+    const fact = { text, chatId: chatId || null, at: Date.now() };
+    if (state.activeAgentUrl) {
+      await window.azure.remoteMemory(state.activeAgentUrl, 'add', fact);
+    } else {
+      await window.azure.addMemory(fact);
+    }
+    await renderMemoryPanel();
+  }
+
+  async function clearAllMemory() {
+    if (state.activeAgentUrl) {
+      await window.azure.remoteMemory(state.activeAgentUrl, 'clear');
+    } else {
+      await window.azure.clearMemory();
+    }
+    await renderMemoryPanel();
+  }
+
+  async function renderMemoryPanel() {
+    const box = $('#memory-list');
+    if (!box) return;
+    const facts = await loadMemoryFacts();
+    $('#memory-count') && ($('#memory-count').textContent = String(facts.length));
+    if (!facts.length) {
+      box.innerHTML = '<div class="empty-state">No memory yet — it fills in as you chat.</div>';
+      return;
+    }
+    box.innerHTML = facts.map(f =>
+      `<div class="memory-item">${esc(f.text)}</div>`
+    ).join('');
+  }
+
+  $('#btn-clear-memory')?.addEventListener('click', async () => {
+    if (!confirm('Clear long-term memory? The AI will forget prior chats context.')) return;
+    await clearAllMemory();
+  });
+
   async function refreshTokens() {
     // Prefer host balance when using a remote agent
     if (state.activeAgentUrl) {
+
       const bal = await window.azure.remoteBalance(state.activeAgentUrl);
       if (!bal.error && typeof bal.tokens === 'number') {
         state.tokens = bal.tokens;
@@ -997,9 +1137,11 @@ Rules:
         </div>
         <div class="hci-tokens">
           <strong>${c.tokens ?? 0}</strong>
+          <span class="hci-mem">${(c.memory && c.memory.length) || 0} mem</span>
           <button class="btn btn-secondary btn-sm" data-grant="10">+10</button>
           <button class="btn btn-secondary btn-sm" data-grant="50">+50</button>
-          <button class="btn btn-ghost btn-sm" data-set="0">Reset</button>
+          <button class="btn btn-ghost btn-sm" data-set="0">Reset tok</button>
+          <button class="btn btn-ghost btn-sm" data-clearmem="1">Clear mem</button>
         </div>
       </div>`;
     }).join('');
@@ -1017,7 +1159,16 @@ Rules:
         await renderHostClients();
       };
     });
+    list.querySelectorAll('[data-clearmem]').forEach(btn => {
+      btn.onclick = async () => {
+        const id = btn.closest('.host-client-row')?.dataset.id;
+        if (!confirm('Clear this device\'s long-term memory on the host?')) return;
+        await window.azure.clearClientMemory(id);
+        await renderHostClients();
+      };
+    });
   }
+
   $('#btn-refresh-clients')?.addEventListener('click', () => renderHostClients());
 
 
@@ -1074,7 +1225,9 @@ Rules:
     renderPairedList();
     await renderHostClients();
     await refreshTokens();
+    await renderMemoryPanel();
   }
+
 
 
   $('#btn-save-host-policy')?.addEventListener('click', async () => {
@@ -1434,6 +1587,7 @@ Rules:
     renderProjects();
     renderMessages();
     updateAgentIndicator();
+    await renderMemoryPanel();
     // check updates after UI is ready
     setTimeout(() => { runUpdateCheck(); }, 1200);
     setInterval(() => {

@@ -37,6 +37,8 @@ const store = new Store({
     agentClientTokenCap: 200,       // max balance per device on this host
     // Host-side per-device balances (authoritative — not client-editable)
     agentClients: {},
+    // Long-term memory (local). Remote clients store memory on the host per device.
+    agentMemory: [],
     // Tokens (legacy local display when using remote; real balance lives on host)
     tokens: 100,
     tokenCap: 100,
@@ -47,6 +49,36 @@ const store = new Store({
     pairedAgents: []
   }
 });
+
+const MEMORY_MAX_FACTS = 40;
+const MEMORY_MAX_CHARS = 6000;
+
+function normalizeMemory(list) {
+  const arr = Array.isArray(list) ? list : [];
+  return arr
+    .filter(f => f && typeof f.text === 'string' && f.text.trim())
+    .slice(0, MEMORY_MAX_FACTS);
+}
+
+function appendMemoryFact(list, fact) {
+  const text = String(fact.text || '').trim().replace(/\s+/g, ' ').slice(0, 280);
+  if (text.length < 6) return normalizeMemory(list);
+  const next = normalizeMemory(list).filter(f => f.text.toLowerCase() !== text.toLowerCase());
+  next.unshift({
+    id: fact.id || uuidv4(),
+    text,
+    chatId: fact.chatId || null,
+    at: fact.at || Date.now()
+  });
+  let chars = 0;
+  const out = [];
+  for (const f of next) {
+    chars += f.text.length;
+    if (out.length >= MEMORY_MAX_FACTS || chars > MEMORY_MAX_CHARS) break;
+    out.push(f);
+  }
+  return out;
+}
 
 function getOrCreateDeviceId() {
   let id = store.get('deviceId');
@@ -70,12 +102,14 @@ function saveAgentClient(id, patch) {
     chatCount: 0,
     lastSeen: 0,
     lastPreview: '',
+    memory: [],
     registeredAt: Date.now()
   };
   all[id] = { ...prev, ...patch, id, lastSeen: Date.now() };
   store.set('agentClients', all);
   return all[id];
 }
+
 
 function estimateHostCost(userText, maxCost) {
   const len = (userText || '').length;
@@ -195,16 +229,121 @@ async function startOllama() {
   return false;
 }
 
+function sendInstallProgress(pct, label) {
+  try {
+    mainWindow?.webContents.send('ollama:install-progress', {
+      percent: Math.max(0, Math.min(100, Math.round(pct))),
+      label: label || 'Installing…'
+    });
+  } catch {}
+}
+
+/** Hidden Ollama install for Windows with progress events (no visible PowerShell). */
 function installOllamaWindows() {
   return new Promise((resolve, reject) => {
+    sendInstallProgress(2, 'Starting installer…');
+
+    // Prefer downloading OllamaSetup.exe (reliable) then run silently.
+    // Fallback: official install.ps1 still hidden.
+    const tmpDir = path.join(os.tmpdir(), 'aam-ollama-install');
+    try {
+      if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+    } catch {}
+
+    const setupPath = path.join(tmpDir, 'OllamaSetup.exe');
+    const script = `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$setup = '${setupPath.replace(/'/g, "''")}'
+$urls = @(
+  'https://ollama.com/download/OllamaSetup.exe',
+  'https://github.com/ollama/ollama/releases/latest/download/OllamaSetup.exe'
+)
+$ok = $false
+foreach ($u in $urls) {
+  try {
+    Write-Output "PROGRESS:5:Downloading from $u"
+    Invoke-WebRequest -Uri $u -OutFile $setup -UseBasicParsing
+    if (Test-Path $setup) { $ok = $true; break }
+  } catch {
+    Write-Output "PROGRESS:8:Retry download…"
+  }
+}
+if (-not $ok) {
+  Write-Output "PROGRESS:10:Falling back to install.ps1"
+  irm https://ollama.com/install.ps1 | iex
+  Write-Output "PROGRESS:95:Script finished"
+  exit 0
+}
+Write-Output "PROGRESS:40:Download complete"
+Write-Output "PROGRESS:45:Running OllamaSetup.exe"
+$p = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT /NORESTART' -Wait -PassThru -WindowStyle Hidden
+Write-Output ("PROGRESS:90:Installer exit " + $p.ExitCode)
+if ($p.ExitCode -ne 0 -and $p.ExitCode -ne $null) { exit $p.ExitCode }
+Write-Output "PROGRESS:100:Done"
+exit 0
+`.trim();
+
     const ps = spawn('powershell.exe', [
-      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
-      'irm https://ollama.com/install.ps1 | iex'
-    ], { stdio: 'inherit', windowsHide: false });
-    ps.on('close', (code) => code === 0 ? resolve(true) : reject(new Error(`Installer exit ${code}`)));
-    ps.on('error', reject);
+      '-NoProfile',
+      '-ExecutionPolicy', 'Bypass',
+      '-WindowStyle', 'Hidden',
+      '-Command', script
+    ], {
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    let lastPct = 2;
+    const onData = (buf) => {
+      const text = buf.toString();
+      for (const line of text.split(/\r?\n/)) {
+        const m = line.match(/PROGRESS:(\d+):(.*)/);
+        if (m) {
+          lastPct = parseInt(m[1], 10) || lastPct;
+          sendInstallProgress(lastPct, (m[2] || '').trim() || 'Installing…');
+        } else if (/Downloading/i.test(line)) {
+          lastPct = Math.max(lastPct, 15);
+          sendInstallProgress(lastPct, 'Downloading Ollama…');
+        } else if (/install/i.test(line)) {
+          lastPct = Math.max(lastPct, 50);
+          sendInstallProgress(lastPct, line.trim().slice(0, 80));
+        }
+      }
+    };
+    ps.stdout?.on('data', onData);
+    ps.stderr?.on('data', onData);
+
+    // Soft progress while silent phases run
+    let tick = 0;
+    const timer = setInterval(() => {
+      tick += 1;
+      if (lastPct < 85 && lastPct >= 40) {
+        lastPct = Math.min(85, lastPct + 1);
+        sendInstallProgress(lastPct, 'Installing Ollama…');
+      } else if (lastPct < 35) {
+        lastPct = Math.min(35, lastPct + 1);
+        sendInstallProgress(lastPct, 'Downloading Ollama…');
+      }
+      if (tick > 300) clearInterval(timer); // safety ~5min
+    }, 1000);
+
+    ps.on('close', (code) => {
+      clearInterval(timer);
+      if (code === 0) {
+        sendInstallProgress(100, 'Installed');
+        resolve(true);
+      } else {
+        reject(new Error(`Installer exit ${code}`));
+      }
+    });
+    ps.on('error', (e) => {
+      clearInterval(timer);
+      reject(e);
+    });
   });
 }
+
 
 // ─── Agent Server (pairing) ───────────────────────────────────────
 function getLocalIPs() {
@@ -303,13 +442,67 @@ function startAgentServer() {
         tokens: client.tokens,
         requireTokens,
         maxCostPerMsg,
-        cap: clientCap
+        cap: clientCap,
+        memory: normalizeMemory(client.memory)
       }));
+      return;
+    }
+
+    // Long-term memory for a device (host-authoritative when remote)
+    if (url.pathname === '/agent/memory' && req.method === 'GET') {
+      const deviceId = String(url.searchParams.get('deviceId') || req.headers['x-device-id'] || '').trim();
+      if (!deviceId) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'deviceId required' }));
+        return;
+      }
+      const client = getAgentClients()[deviceId] || saveAgentClient(deviceId, { name: 'Client' });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ memory: normalizeMemory(client.memory) }));
+      return;
+    }
+
+    if (url.pathname === '/agent/memory' && req.method === 'POST') {
+      const payload = await readJson();
+      const deviceId = String(payload.deviceId || req.headers['x-device-id'] || '').trim();
+      if (!deviceId) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'deviceId required' }));
+        return;
+      }
+      let client = getAgentClients()[deviceId] || saveAgentClient(deviceId, {
+        name: String(payload.name || 'Client').slice(0, 64)
+      });
+      let mem = normalizeMemory(client.memory);
+      if (Array.isArray(payload.replace)) {
+        mem = normalizeMemory(payload.replace);
+      } else if (payload.fact) {
+        mem = appendMemoryFact(mem, payload.fact);
+      } else if (Array.isArray(payload.facts)) {
+        for (const f of payload.facts) mem = appendMemoryFact(mem, f);
+      }
+      client = saveAgentClient(deviceId, { memory: mem });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, memory: normalizeMemory(client.memory) }));
+      return;
+    }
+
+    if (url.pathname === '/agent/memory' && req.method === 'DELETE') {
+      const deviceId = String(url.searchParams.get('deviceId') || req.headers['x-device-id'] || '').trim();
+      if (!deviceId) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'deviceId required' }));
+        return;
+      }
+      if (getAgentClients()[deviceId]) saveAgentClient(deviceId, { memory: [] });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, memory: [] }));
       return;
     }
 
     // Proxy chat to local Ollama (streaming) — host charges tokens if required
     if (url.pathname === '/agent/chat' && req.method === 'POST') {
+
       const payload = await readJson();
       try {
         const deviceId = String(payload.deviceId || req.headers['x-device-id'] || '').trim() || 'anonymous';
@@ -909,6 +1102,73 @@ ipcMain.handle('agent:grant-tokens', (_e, { deviceId, amount }) => {
   return { ok: true, tokens: next };
 });
 
+// Local long-term memory
+ipcMain.handle('memory:list', () => normalizeMemory(store.get('agentMemory')));
+ipcMain.handle('memory:clear', () => {
+  store.set('agentMemory', []);
+  return { ok: true, memory: [] };
+});
+ipcMain.handle('memory:add', (_e, fact) => {
+  const next = appendMemoryFact(store.get('agentMemory'), fact || {});
+  store.set('agentMemory', next);
+  return { ok: true, memory: next };
+});
+ipcMain.handle('memory:set', (_e, list) => {
+  const next = normalizeMemory(list);
+  store.set('agentMemory', next);
+  return { ok: true, memory: next };
+});
+
+// Host clears a remote device's memory
+ipcMain.handle('agent:clear-client-memory', (_e, deviceId) => {
+  if (!deviceId) return { ok: false, error: 'deviceId required' };
+  if (!getAgentClients()[deviceId]) return { ok: false, error: 'Unknown device' };
+  saveAgentClient(deviceId, { memory: [] });
+  return { ok: true };
+});
+
+// Client ↔ remote host memory sync
+ipcMain.handle('agent:remote-memory', async (_e, { baseUrl, action, fact }) => {
+  try {
+    const deviceId = getOrCreateDeviceId();
+    const deviceName = store.get('deviceName') || os.hostname() || 'Client';
+    const base = String(baseUrl || '').replace(/\/$/, '');
+    if (!base) return { error: 'no url' };
+
+    if (action === 'list') {
+      const res = await fetch(`${base}/agent/memory?deviceId=${encodeURIComponent(deviceId)}`, {
+        headers: { 'X-Device-Id': deviceId },
+        signal: AbortSignal.timeout(4000)
+      });
+      if (!res.ok) throw new Error('memory list failed');
+      return await res.json();
+    }
+    if (action === 'clear') {
+      const res = await fetch(`${base}/agent/memory?deviceId=${encodeURIComponent(deviceId)}`, {
+        method: 'DELETE',
+        headers: { 'X-Device-Id': deviceId },
+        signal: AbortSignal.timeout(4000)
+      });
+      if (!res.ok) throw new Error('memory clear failed');
+      return await res.json();
+    }
+    if (action === 'add' && fact) {
+      const res = await fetch(`${base}/agent/memory`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Device-Id': deviceId },
+        body: JSON.stringify({ deviceId, name: deviceName, fact }),
+        signal: AbortSignal.timeout(4000)
+      });
+      if (!res.ok) throw new Error('memory add failed');
+      return await res.json();
+    }
+    return { error: 'unknown action' };
+  } catch (e) {
+    return { error: e.message };
+  }
+});
+
+
 ipcMain.handle('agent:set-client-tokens', (_e, { deviceId, tokens }) => {
   if (!deviceId) return { ok: false, error: 'deviceId required' };
   const cap = store.get('agentClientTokenCap') ?? 200;
@@ -1045,19 +1305,31 @@ ipcMain.handle('chats:list', () => store.get('chats') || []);
 ipcMain.handle('chats:save', (_e, chats) => { store.set('chats', chats); return true; });
 ipcMain.handle('chats:get', (_e, id) => (store.get('chats') || []).find(c => c.id === id) || null);
 
-// App lifecycle
-app.whenReady().then(async () => {
-  createWindow();
-  createTray();
-  // auto-restart agent server if it was enabled
-  if (store.get('agentServerEnabled')) {
-    try { startAgentServer(); } catch (e) { console.error(e); }
-  }
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
-    else showMainWindow();
+// App lifecycle — only one instance allowed
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  // Another instance is already running
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    // Focus / restore the existing window instead of opening a new one
+    showMainWindow();
   });
-});
+
+  app.whenReady().then(async () => {
+    createWindow();
+    createTray();
+    // auto-restart agent server if it was enabled
+    if (store.get('agentServerEnabled')) {
+      try { startAgentServer(); } catch (e) { console.error(e); }
+    }
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+      else showMainWindow();
+    });
+  });
+}
+
 
 // Do not quit when window is hidden to tray
 app.on('window-all-closed', (e) => {
