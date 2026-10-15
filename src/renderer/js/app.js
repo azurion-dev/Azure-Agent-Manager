@@ -421,13 +421,26 @@
     }
   });
 
+  function setTokenWarn(msg) {
+    const el = $('#token-warn');
+    if (!el) return;
+    if (msg) {
+      el.textContent = msg;
+      el.classList.remove('hidden');
+    } else {
+      el.classList.add('hidden');
+    }
+  }
+
   function updateSendBtn() {
     const hasText = inputEl.value.trim().length > 0;
     const hasModel = !!$('#model-select').value;
-    $('#btn-send').disabled = !hasText || !hasModel || state.streaming;
+    const blocked = !!state.tokenBlocked;
+    $('#btn-send').disabled = !hasText || !hasModel || state.streaming || blocked;
     $('#btn-send').classList.toggle('hidden', state.streaming);
     $('#btn-cancel').classList.toggle('hidden', !state.streaming);
   }
+
 
   $('#btn-send').onclick = () => sendMessage();
   $('#btn-cancel').onclick = async () => { await window.azure.cancelChat(); };
@@ -449,7 +462,40 @@
   async function sendMessage() {
     const text = inputEl.value.trim();
     const model = $('#model-select').value;
-    if (!text || !model || state.streaming) return;
+    if (!text || !model || state.streaming || state.tokenBlocked) return;
+
+    // Live policy + balance from host before sending
+    if (state.activeAgentUrl) {
+      try {
+        const bal = await window.azure.remoteBalance(state.activeAgentUrl);
+        if (!bal.error) {
+          const agent = state.paired.find(a => a.url === state.activeAgentUrl);
+          if (agent) {
+            agent.requireTokens = bal.requireTokens !== false;
+            agent.maxCostPerMsg = bal.maxCostPerMsg ?? agent.maxCostPerMsg;
+          }
+          if (typeof bal.tokens === 'number') {
+            state.tokens = bal.tokens;
+            $('#token-count').textContent = bal.tokens;
+          }
+          if (bal.requireTokens !== false) {
+            const est = Math.max(1, Math.min(bal.maxCostPerMsg || 50, Math.ceil(text.length / 400)));
+            if ((bal.tokens ?? 0) < est) {
+              state.tokenBlocked = true;
+              setTokenWarn(`Not enough tokens on the host (${bal.tokens}/${est}). Ask the host to grant more.`);
+              updateSendBtn();
+              return;
+            }
+          } else {
+            state.tokenBlocked = false;
+            setTokenWarn(null);
+          }
+        }
+      } catch {}
+    } else {
+      state.tokenBlocked = false;
+      setTokenWarn(null);
+    }
 
     let chat = currentChat();
     if (!chat) { newChat(); chat = currentChat(); }
@@ -465,6 +511,7 @@
     renderMessages();
     renderChatList();
     saveChats();
+
 
     const msgsForApi = [];
     for (const m of chat.messages) {
@@ -560,18 +607,20 @@ Rules:
       }
       setStreaming(false);
       renderMessages();
+      if (data.insufficient || /not enough tokens/i.test(data.error || '')) {
+        state.tokenBlocked = true;
+        setTokenWarn(data.error || 'Not enough tokens on the host. Ask the host to grant more.');
+        updateSendBtn();
+      }
     });
 
 
+
     const payload = { model, messages, options: { temperature: 0.7 } };
-    if (state.activeAgentUrl) {
-      payload.agentUrl = state.activeAgentUrl;
-      const agent = state.paired.find(a => a.url === state.activeAgentUrl);
-      payload.chargeTokens = agent?.requireTokens !== false;
-      if (agent?.maxCostPerMsg) payload.maxCostPerMsg = agent.maxCostPerMsg;
-    }
+    if (state.activeAgentUrl) payload.agentUrl = state.activeAgentUrl;
     await window.azure.chat(payload);
   }
+
 
 
   async function parseAndApplyEdits(content) {
@@ -907,14 +956,70 @@ Rules:
   };
 
   async function refreshTokens() {
+    // Prefer host balance when using a remote agent
+    if (state.activeAgentUrl) {
+      const bal = await window.azure.remoteBalance(state.activeAgentUrl);
+      if (!bal.error && typeof bal.tokens === 'number') {
+        state.tokens = bal.tokens;
+        $('#token-count').textContent = bal.tokens;
+        $('#token-big').textContent = bal.tokens;
+        if (bal.requireTokens === false) {
+          state.tokenBlocked = false;
+          setTokenWarn(null);
+        }
+        return;
+      }
+    }
     const t = await window.azure.getTokens();
     state.tokens = t.tokens;
     state.tokenCap = t.cap;
     $('#token-count').textContent = t.tokens;
-    $('#token-big').textContent = t.tokens;
-    $('#token-cap-label').textContent = t.cap;
-    $('#token-cap-input').value = t.cap;
+    if ($('#token-big')) $('#token-big').textContent = t.tokens;
+    if ($('#token-cap-label')) $('#token-cap-label').textContent = t.cap;
+    if ($('#token-cap-input')) $('#token-cap-input').value = t.cap;
   }
+
+  async function renderHostClients() {
+    const list = $('#host-clients-list');
+    if (!list) return;
+    const clients = await window.azure.listAgentClients();
+    if (!clients.length) {
+      list.innerHTML = '<div class="empty-state">No devices connected yet</div>';
+      return;
+    }
+    list.innerHTML = clients.map(c => {
+      const ago = c.lastSeen ? Math.round((Date.now() - c.lastSeen) / 60000) : '?';
+      return `<div class="host-client-row" data-id="${esc(c.id)}">
+        <div class="hci-main">
+          <div class="hci-name">${esc(c.name || 'Device')}</div>
+          <div class="hci-meta">${esc(c.id.slice(0, 8))}… · ${c.chatCount || 0} chats · last ${ago}m ago</div>
+          <div class="hci-preview">${esc(c.lastPreview || '')}</div>
+        </div>
+        <div class="hci-tokens">
+          <strong>${c.tokens ?? 0}</strong>
+          <button class="btn btn-secondary btn-sm" data-grant="10">+10</button>
+          <button class="btn btn-secondary btn-sm" data-grant="50">+50</button>
+          <button class="btn btn-ghost btn-sm" data-set="0">Reset</button>
+        </div>
+      </div>`;
+    }).join('');
+    list.querySelectorAll('[data-grant]').forEach(btn => {
+      btn.onclick = async () => {
+        const id = btn.closest('.host-client-row')?.dataset.id;
+        await window.azure.grantClientTokens(id, parseInt(btn.dataset.grant, 10));
+        await renderHostClients();
+      };
+    });
+    list.querySelectorAll('[data-set]').forEach(btn => {
+      btn.onclick = async () => {
+        const id = btn.closest('.host-client-row')?.dataset.id;
+        await window.azure.setClientTokens(id, 0);
+        await renderHostClients();
+      };
+    });
+  }
+  $('#btn-refresh-clients')?.addEventListener('click', () => renderHostClients());
+
 
   window.azure.onTokensUpdate((data) => {
     if (typeof data.tokens === 'number') {
@@ -967,8 +1072,10 @@ Rules:
     if ($('#agent-max-chars') && maxChars != null) $('#agent-max-chars').value = maxChars;
     state.paired = await window.azure.listPaired();
     renderPairedList();
+    await renderHostClients();
     await refreshTokens();
   }
+
 
   $('#btn-save-host-policy')?.addEventListener('click', async () => {
     const name = $('#agent-name-input')?.value.trim();
@@ -1013,15 +1120,33 @@ Rules:
         if (state.activeAgentUrl === agent.url) {
           state.activeAgentUrl = null;
           state.activeAgentName = null;
+          state.tokenBlocked = false;
+          setTokenWarn(null);
         } else {
           state.activeAgentUrl = agent.url;
           state.activeAgentName = agent.name;
+          // Refresh live host policy + balance
+          const bal = await window.azure.remoteBalance(agent.url);
+          if (!bal.error) {
+            agent.requireTokens = bal.requireTokens !== false;
+            agent.maxCostPerMsg = bal.maxCostPerMsg ?? 50;
+            if (typeof bal.tokens === 'number') {
+              state.tokens = bal.tokens;
+              $('#token-count').textContent = bal.tokens;
+            }
+            if (bal.requireTokens === false) {
+              state.tokenBlocked = false;
+              setTokenWarn(null);
+            }
+          }
         }
         await loadModels();
         renderPairedList();
         updateAgentIndicator();
+        updateSendBtn();
       };
     });
+
     list.querySelectorAll('[data-rm]').forEach(btn => {
       btn.onclick = async () => {
         const agent = state.paired.find(a => a.id === btn.dataset.rm);
@@ -1175,7 +1300,10 @@ Rules:
     pendingUpdate = data;
     $('#upd-from').textContent = data.current || '?';
     $('#upd-to').textContent = data.latest || '?';
-    $('#upd-notes').textContent = data.body || 'No release notes provided.';
+    const notes = data.body || 'No release notes provided.';
+    const notesEl = $('#upd-notes');
+    if (notesEl) notesEl.innerHTML = `<div class="markdown-body">${md(notes)}</div>`;
+
     $('#upd-download-area').classList.add('hidden');
     $('#upd-hint').textContent = data.assetName
       ? `Installer: ${data.assetName}`
@@ -1274,6 +1402,26 @@ Rules:
     showUpdateModal(result);
   }
 
+  // UI zoom: Ctrl + / - / 0 and Ctrl + mouse wheel
+  let uiZoom = parseFloat(localStorage.getItem('aam-ui-zoom') || '1') || 1;
+  function applyZoom(z) {
+    uiZoom = Math.max(0.75, Math.min(1.5, z));
+    document.documentElement.style.zoom = String(uiZoom);
+    localStorage.setItem('aam-ui-zoom', String(uiZoom));
+  }
+  applyZoom(uiZoom);
+  window.addEventListener('keydown', (e) => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    if (e.key === '=' || e.key === '+') { e.preventDefault(); applyZoom(uiZoom + 0.05); }
+    if (e.key === '-') { e.preventDefault(); applyZoom(uiZoom - 0.05); }
+    if (e.key === '0') { e.preventDefault(); applyZoom(1); }
+  });
+  window.addEventListener('wheel', (e) => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    applyZoom(uiZoom + (e.deltaY < 0 ? 0.05 : -0.05));
+  }, { passive: false });
+
   async function initApp() {
     const settings = await window.azure.getAllSettings();
     applyTheme(settings.theme || 'dark');
@@ -1301,6 +1449,7 @@ Rules:
       runUpdateCheck();
     });
   }
+
 
 
   (async () => {

@@ -1047,3 +1047,38 @@ input:focus, textarea:focus, select:focus { border-color: var(--ac); }
   height: 16px;
   accent-color: var(--ac);
 }
+
+/* Token warning under composer */
+.token-warn {
+  margin-top: 8px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  color: #fca5a5;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+.token-warn.hidden { display: none; }
+
+/* Host connected devices */
+.host-clients-list { display: flex; flex-direction: column; gap: 10px; }
+.host-client-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 12px;
+  border-radius: 12px;
+  background: var(--bg2);
+  border: 1px solid var(--bd);
+}
+.hci-name { font-weight: 600; font-size: 13.5px; }
+.hci-meta { font-size: 11.5px; color: var(--mu); margin-top: 2px; }
+.hci-preview { font-size: 12px; color: var(--mu); margin-top: 6px; max-width: 360px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hci-tokens { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.hci-tokens strong { min-width: 28px; text-align: right; color: var(--ac); }
+.btn-sm { padding: 4px 8px !important; font-size: 12px !important; }
+
+#upd-notes { max-height: 220px; overflow-y: auto; }
+#upd-notes .markdown-body { font-size: 13px; }

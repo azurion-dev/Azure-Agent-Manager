@@ -33,14 +33,57 @@ const store = new Store({
     agentRequireTokens: true,       // if false, remote clients use this host for free
     agentMaxCostPerMsg: 50,         // max token cost charged per remote message (1–100)
     agentMaxResponseChars: 50000,   // soft limit passed to clients as info
-    // Tokens (client side when using remote agent)
+    agentDefaultClientTokens: 100,  // starting balance for new devices on this host
+    agentClientTokenCap: 200,       // max balance per device on this host
+    // Host-side per-device balances (authoritative — not client-editable)
+    agentClients: {},
+    // Tokens (legacy local display when using remote; real balance lives on host)
     tokens: 100,
     tokenCap: 100,
     lastTokenRegen: 0,
+    deviceId: null,
+    deviceName: os.hostname() || 'Client',
     // Connected remote agents
     pairedAgents: []
   }
 });
+
+function getOrCreateDeviceId() {
+  let id = store.get('deviceId');
+  if (!id) {
+    id = uuidv4();
+    store.set('deviceId', id);
+  }
+  return id;
+}
+
+function getAgentClients() {
+  return store.get('agentClients') || {};
+}
+
+function saveAgentClient(id, patch) {
+  const all = getAgentClients();
+  const prev = all[id] || {
+    id,
+    name: 'Unknown',
+    tokens: store.get('agentDefaultClientTokens') ?? 100,
+    chatCount: 0,
+    lastSeen: 0,
+    lastPreview: '',
+    registeredAt: Date.now()
+  };
+  all[id] = { ...prev, ...patch, id, lastSeen: Date.now() };
+  store.set('agentClients', all);
+  return all[id];
+}
+
+function estimateHostCost(userText, maxCost) {
+  const len = (userText || '').length;
+  let cost = Math.max(1, Math.ceil(len / 400));
+  const cap = Math.max(1, Math.min(100, Number(maxCost) || 50));
+  return Math.min(cost, cap);
+}
+
 
 
 let mainWindow = null;
@@ -183,10 +226,24 @@ function startAgentServer() {
   agentServer = http.createServer(async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Agent-Token');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Device-Id, X-Device-Name');
     if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
     const url = new URL(req.url, `http://localhost:${port}`);
+    const requireTokens = store.get('agentRequireTokens') !== false;
+    const maxCostPerMsg = store.get('agentMaxCostPerMsg') ?? 50;
+    const maxResponseChars = store.get('agentMaxResponseChars') ?? 50000;
+    const clientCap = store.get('agentClientTokenCap') ?? 200;
+    const defaultTok = store.get('agentDefaultClientTokens') ?? 100;
+
+    const readJson = () => new Promise((resolve) => {
+      let body = '';
+      req.on('data', c => { body += c; });
+      req.on('end', () => {
+        try { resolve(JSON.parse(body || '{}')); }
+        catch { resolve({}); }
+      });
+    });
 
     // Health / info
     if (url.pathname === '/agent/info' && req.method === 'GET') {
@@ -197,69 +254,143 @@ function startAgentServer() {
         power: machinePowerScore(),
         regenRate: tokenRegenRate(),
         models: (models || []).map(m => m.name),
-        version: '1.1',
-        requireTokens: store.get('agentRequireTokens') !== false,
-        maxCostPerMsg: store.get('agentMaxCostPerMsg') ?? 50,
-        maxResponseChars: store.get('agentMaxResponseChars') ?? 50000
+        version: '1.2',
+        requireTokens,
+        maxCostPerMsg,
+        maxResponseChars,
+        defaultClientTokens: defaultTok,
+        clientTokenCap: clientCap
       }));
       return;
     }
 
-    // Proxy chat to local Ollama (streaming)
-    if (url.pathname === '/agent/chat' && req.method === 'POST') {
-      let body = '';
-      req.on('data', c => { body += c; });
-      req.on('end', async () => {
-        try {
-          const payload = JSON.parse(body || '{}');
-          // Host policy: optional token requirement is informational for clients;
-          // max response can be hinted via options.num_predict
-          const opts = { ...(payload.options || {}) };
-          const maxChars = store.get('agentMaxResponseChars') ?? 50000;
-          if (maxChars > 0 && !opts.num_predict) {
-            // ~4 chars per token rough upper bound
-            opts.num_predict = Math.min(8192, Math.ceil(maxChars / 3));
-          }
-          const ollamaUrl = store.get('ollamaUrl') || 'http://127.0.0.1:11434';
-          const upstream = await fetch(`${ollamaUrl}/api/chat`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              model: payload.model,
-              messages: payload.messages,
-              stream: true,
-              options: opts
-            })
-          });
-          if (!upstream.ok) {
-            res.writeHead(upstream.status, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: await upstream.text() }));
-            return;
-          }
-          res.writeHead(200, {
-            'Content-Type': 'application/x-ndjson',
-            'Transfer-Encoding': 'chunked'
-          });
-          const reader = upstream.body.getReader();
-          const decoder = new TextDecoder();
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            res.write(decoder.decode(value, { stream: true }));
-          }
-          res.end();
-        } catch (e) {
-          if (!res.headersSent) {
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: e.message }));
-          } else {
-            res.end();
-          }
-        }
+    // Register / heartbeat a client device (host stores the record)
+    if (url.pathname === '/agent/register' && req.method === 'POST') {
+      const payload = await readJson();
+      const deviceId = String(payload.deviceId || req.headers['x-device-id'] || '').trim();
+      if (!deviceId) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'deviceId required' }));
+        return;
+      }
+      const client = saveAgentClient(deviceId, {
+        name: String(payload.name || payload.deviceName || 'Client').slice(0, 64),
+        tokens: (getAgentClients()[deviceId]?.tokens) ?? defaultTok
       });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: true,
+        tokens: client.tokens,
+        requireTokens,
+        maxCostPerMsg,
+        cap: clientCap
+      }));
       return;
     }
 
+    // Balance for a device (authoritative host value)
+    if (url.pathname === '/agent/balance' && req.method === 'GET') {
+      const deviceId = String(url.searchParams.get('deviceId') || req.headers['x-device-id'] || '').trim();
+      if (!deviceId) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'deviceId required' }));
+        return;
+      }
+      const existing = getAgentClients()[deviceId];
+      const client = existing || saveAgentClient(deviceId, { name: 'Client', tokens: defaultTok });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        tokens: client.tokens,
+        requireTokens,
+        maxCostPerMsg,
+        cap: clientCap
+      }));
+      return;
+    }
+
+    // Proxy chat to local Ollama (streaming) — host charges tokens if required
+    if (url.pathname === '/agent/chat' && req.method === 'POST') {
+      const payload = await readJson();
+      try {
+        const deviceId = String(payload.deviceId || req.headers['x-device-id'] || '').trim() || 'anonymous';
+        const deviceName = String(payload.deviceName || req.headers['x-device-name'] || 'Client').slice(0, 64);
+        const userText = (payload.messages || []).filter(m => m.role === 'user').slice(-1)[0]?.content || '';
+        const cost = estimateHostCost(userText, maxCostPerMsg);
+
+        let client = getAgentClients()[deviceId];
+        if (!client) {
+          client = saveAgentClient(deviceId, { name: deviceName, tokens: defaultTok });
+        } else {
+          client = saveAgentClient(deviceId, { name: deviceName || client.name });
+        }
+
+        if (requireTokens) {
+          if ((client.tokens || 0) < cost) {
+            res.writeHead(402, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              error: 'insufficient_tokens',
+              message: `Not enough tokens (${client.tokens}/${cost}). Ask the host to grant more.`,
+              tokens: client.tokens,
+              cost
+            }));
+            return;
+          }
+          client = saveAgentClient(deviceId, {
+            tokens: Math.max(0, (client.tokens || 0) - cost),
+            chatCount: (client.chatCount || 0) + 1,
+            lastPreview: String(userText).slice(0, 120)
+          });
+        } else {
+          client = saveAgentClient(deviceId, {
+            chatCount: (client.chatCount || 0) + 1,
+            lastPreview: String(userText).slice(0, 120)
+          });
+        }
+
+        const opts = { ...(payload.options || {}) };
+        if (maxResponseChars > 0 && !opts.num_predict) {
+          opts.num_predict = Math.min(8192, Math.ceil(maxResponseChars / 3));
+        }
+        const ollamaUrl = store.get('ollamaUrl') || 'http://127.0.0.1:11434';
+        const upstream = await fetch(`${ollamaUrl}/api/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: payload.model,
+            messages: payload.messages,
+            stream: true,
+            options: opts
+          })
+        });
+        if (!upstream.ok) {
+          res.writeHead(upstream.status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: await upstream.text() }));
+          return;
+        }
+        res.writeHead(200, {
+          'Content-Type': 'application/x-ndjson',
+          'Transfer-Encoding': 'chunked',
+          'X-Tokens-Remaining': String(client.tokens),
+          'X-Tokens-Charged': requireTokens ? String(cost) : '0'
+        });
+        const reader = upstream.body.getReader();
+        const decoder = new TextDecoder();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          res.write(decoder.decode(value, { stream: true }));
+        }
+        res.end();
+      } catch (e) {
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: e.message }));
+        } else {
+          res.end();
+        }
+      }
+      return;
+    }
 
     // List models
     if (url.pathname === '/agent/models' && req.method === 'GET') {
@@ -272,6 +403,7 @@ function startAgentServer() {
     res.writeHead(404);
     res.end('Not found');
   });
+
 
   agentServer.listen(port, '0.0.0.0', () => {
     console.log(`Agent server listening on 0.0.0.0:${port}`);
@@ -582,31 +714,11 @@ ipcMain.handle('ollama:chat', async (event, payload) => {
   currentAbortController = new AbortController();
   const signal = currentAbortController.signal;
 
-  const { model, messages, options = {}, agentUrl, chargeTokens, maxCostPerMsg } = payload;
-  // agentUrl = remote paired agent base, e.g. http://192.168.1.10:7749
+  const { model, messages, options = {}, agentUrl } = payload;
   const isRemote = !!(agentUrl && agentUrl.startsWith('http'));
-  // chargeTokens defaults true for remote unless host says free
-  const shouldCharge = isRemote && (chargeTokens !== false);
-  let reserved = 0;
-
-  if (shouldCharge) {
-    const tokens = regenClientTokens();
-    let cost = estimateTokenCost(
-      messages.filter(m => m.role === 'user').slice(-1)[0]?.content || ''
-    );
-    const cap = Math.max(1, Math.min(100, Number(maxCostPerMsg) || 50));
-    cost = Math.min(cost, cap);
-    if (tokens < cost) {
-      mainWindow?.webContents.send('ollama:chat-error', {
-        error: `Not enough tokens (${tokens}/${cost}). Wait for regeneration.`
-      });
-      return { ok: false, error: 'insufficient_tokens', tokens, cost };
-    }
-    reserved = cost;
-    store.set('tokens', tokens - cost);
-    mainWindow?.webContents.send('tokens:update', { tokens: tokens - cost });
-  }
-
+  // Tokens for remote agents are charged on the HOST (authoritative). Client never deducts locally.
+  const deviceId = getOrCreateDeviceId();
+  const deviceName = store.get('deviceName') || os.hostname() || 'Client';
 
   const chatUrl = isRemote
     ? `${agentUrl.replace(/\/$/, '')}/agent/chat`
@@ -615,19 +727,46 @@ ipcMain.handle('ollama:chat', async (event, payload) => {
   try {
     const res = await fetch(chatUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(isRemote ? { 'X-Device-Id': deviceId, 'X-Device-Name': deviceName } : {})
+      },
       body: JSON.stringify({
         model,
         messages,
         stream: true,
-        options
+        options,
+        ...(isRemote ? { deviceId, deviceName } : {})
       }),
       signal
     });
 
     if (!res.ok) {
       const errText = await res.text();
+      try {
+        const j = JSON.parse(errText);
+        if (j.error === 'insufficient_tokens' || res.status === 402) {
+          mainWindow?.webContents.send('ollama:chat-error', {
+            error: j.message || `Not enough tokens (${j.tokens}/${j.cost}). Ask the host to grant more.`,
+            tokens: j.tokens,
+            cost: j.cost,
+            insufficient: true
+          });
+          mainWindow?.webContents.send('tokens:update', { tokens: j.tokens ?? 0, host: true });
+          return { ok: false, error: 'insufficient_tokens', tokens: j.tokens, cost: j.cost };
+        }
+      } catch {}
       throw new Error(errText || `HTTP ${res.status}`);
+    }
+
+    // Reflect host balance if provided
+    const remainingHdr = res.headers.get('x-tokens-remaining');
+    if (remainingHdr != null && isRemote) {
+      const t = parseInt(remainingHdr, 10);
+      if (!Number.isNaN(t)) {
+        store.set('tokens', t);
+        mainWindow?.webContents.send('tokens:update', { tokens: t, host: true });
+      }
     }
 
     const reader = res.body.getReader();
@@ -658,23 +797,6 @@ ipcMain.handle('ollama:chat', async (event, payload) => {
       }
     }
 
-    // Adjust tokens by real response size (remote + charging only)
-    if (shouldCharge && fullContent) {
-      const cap = Math.max(1, Math.min(100, Number(maxCostPerMsg) || 50));
-      let fullCost = estimateTokenCost(
-        messages.filter(m => m.role === 'user').slice(-1)[0]?.content || '',
-        fullContent.length
-      );
-      fullCost = Math.min(fullCost, cap);
-      const extra = Math.max(0, fullCost - reserved);
-      if (extra) {
-        const cur = store.get('tokens') ?? 0;
-        store.set('tokens', Math.max(0, cur - extra));
-        mainWindow?.webContents.send('tokens:update', { tokens: Math.max(0, cur - extra) });
-      }
-    }
-
-
     if (signal.aborted) {
       mainWindow?.webContents.send('ollama:chat-done', { content: fullContent, cancelled: true });
       return { ok: true, content: fullContent, cancelled: true };
@@ -691,6 +813,7 @@ ipcMain.handle('ollama:chat', async (event, payload) => {
     currentAbortController = null;
   }
 });
+
 
 ipcMain.handle('ollama:cancel', () => {
   if (currentAbortController) {
@@ -769,6 +892,68 @@ ipcMain.handle('agent:server-status', () => ({
   maxCostPerMsg: store.get('agentMaxCostPerMsg') ?? 50,
   maxResponseChars: store.get('agentMaxResponseChars') ?? 50000
 }));
+
+ipcMain.handle('agent:list-clients', () => {
+  const all = getAgentClients();
+  return Object.values(all).sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+});
+
+ipcMain.handle('agent:grant-tokens', (_e, { deviceId, amount }) => {
+  if (!deviceId) return { ok: false, error: 'deviceId required' };
+  const n = Math.max(0, Math.min(10000, parseInt(amount, 10) || 0));
+  const client = getAgentClients()[deviceId];
+  if (!client) return { ok: false, error: 'Unknown device' };
+  const cap = store.get('agentClientTokenCap') ?? 200;
+  const next = Math.min(cap, (client.tokens || 0) + n);
+  saveAgentClient(deviceId, { tokens: next });
+  return { ok: true, tokens: next };
+});
+
+ipcMain.handle('agent:set-client-tokens', (_e, { deviceId, tokens }) => {
+  if (!deviceId) return { ok: false, error: 'deviceId required' };
+  const cap = store.get('agentClientTokenCap') ?? 200;
+  const next = Math.max(0, Math.min(cap, parseInt(tokens, 10) || 0));
+  if (!getAgentClients()[deviceId]) return { ok: false, error: 'Unknown device' };
+  saveAgentClient(deviceId, { tokens: next });
+  return { ok: true, tokens: next };
+});
+
+ipcMain.handle('device:get-id', () => getOrCreateDeviceId());
+ipcMain.handle('device:get-name', () => store.get('deviceName') || os.hostname() || 'Client');
+ipcMain.handle('device:set-name', (_e, name) => {
+  store.set('deviceName', String(name || '').slice(0, 64));
+  return true;
+});
+
+// Fetch balance from a remote host (for UI badge)
+ipcMain.handle('agent:remote-balance', async (_e, baseUrl) => {
+  try {
+    const deviceId = getOrCreateDeviceId();
+    const deviceName = store.get('deviceName') || os.hostname() || 'Client';
+    const base = baseUrl.replace(/\/$/, '');
+    // register heartbeat
+    await fetch(`${base}/agent/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deviceId, name: deviceName }),
+      signal: AbortSignal.timeout(4000)
+    }).catch(() => null);
+    const res = await fetch(`${base}/agent/balance?deviceId=${encodeURIComponent(deviceId)}`, {
+      headers: { 'X-Device-Id': deviceId },
+      signal: AbortSignal.timeout(4000)
+    });
+    if (!res.ok) throw new Error('balance failed');
+    const data = await res.json();
+    if (typeof data.tokens === 'number') {
+      store.set('tokens', data.tokens);
+      mainWindow?.webContents.send('tokens:update', { tokens: data.tokens, host: true });
+    }
+    return data;
+  } catch (e) {
+    return { error: e.message };
+  }
+});
+
 
 
 ipcMain.handle('agent:probe', async (_e, baseUrl) => {

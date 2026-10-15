@@ -276,10 +276,12 @@
             <span id="context-info">Local agent</span>
             <span id="agent-indicator"></span>
           </div>
+          <div id="token-warn" class="token-warn hidden">Not enough tokens on the host. Ask the host to grant more, or wait for regeneration.</div>
         </div>
       </div>
 
       <!-- Library View -->
+
       <div id="view-library" class="view">
         <div class="view-header">
           <h2>Model Library</h2>
@@ -349,16 +351,23 @@
           </section>
 
           <section class="settings-card">
-            <h3>Paired remote agents</h3>
+            <h3>Connected devices</h3>
+            <p class="hint">Devices that used this host. Token balances are stored <strong>on this PC</strong> (not on the client), so clients cannot cheat. Grant tokens to allow more messages.</p>
+            <button class="btn btn-secondary" id="btn-refresh-clients" style="margin-bottom:12px">Refresh</button>
+            <div id="host-clients-list" class="host-clients-list"></div>
+          </section>
 
-            <p class="hint">Connect to another Azure Agent Manager instance. Messages sent to a remote agent consume your tokens.</p>
+          <section class="settings-card">
+            <h3>Paired remote agents</h3>
+            <p class="hint">Connect to another Azure Agent Manager instance. When the host requires tokens, your balance is stored on the host.</p>
             <button class="btn btn-secondary" id="btn-open-pair" style="margin-bottom:12px">+ Pair agent</button>
             <div id="paired-list"></div>
           </section>
 
           <section class="settings-card">
-            <h3>Your tokens</h3>
-            <p class="hint">Tokens are spent only when you use a <strong>remote</strong> agent. Local models are free. Tokens regenerate every 5 minutes based on the host machine power.</p>
+            <h3>Your tokens (display)</h3>
+            <p class="hint">When using a remote host, the number below is the balance <strong>on that host</strong>. Local models are free.</p>
+
             <div class="token-display">
               <div class="token-big" id="token-big">100</div>
               <div class="token-cap">/ <span id="token-cap-label">100</span></div>

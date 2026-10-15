@@ -87,6 +87,14 @@ contextBridge.exposeInMainWorld('azure', {
   listPaired: () => ipcRenderer.invoke('agent:list-paired'),
   addPaired: (agent) => ipcRenderer.invoke('agent:add-paired', agent),
   removePaired: (id) => ipcRenderer.invoke('agent:remove-paired', id),
+  listAgentClients: () => ipcRenderer.invoke('agent:list-clients'),
+  grantClientTokens: (deviceId, amount) => ipcRenderer.invoke('agent:grant-tokens', { deviceId, amount }),
+  setClientTokens: (deviceId, tokens) => ipcRenderer.invoke('agent:set-client-tokens', { deviceId, tokens }),
+  remoteBalance: (url) => ipcRenderer.invoke('agent:remote-balance', url),
+  getDeviceId: () => ipcRenderer.invoke('device:get-id'),
+  getDeviceName: () => ipcRenderer.invoke('device:get-name'),
+  setDeviceName: (name) => ipcRenderer.invoke('device:set-name', name),
+
 
   createProject: (data) => ipcRenderer.invoke('project:create', data),
   listProjects: () => ipcRenderer.invoke('project:list'),
