@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' http://127.0.0.1:* http://localhost:* http://*:* https:;">
+  <title>Azure Agent Manager</title>
+  <link rel="icon" href="../../assets/app.ico" type="image/x-icon">
+  <link rel="icon" href="../../assets/app.png" type="image/png">
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <!-- Custom Title Bar -->
+  <div id="titlebar">
+    <div class="titlebar-drag">
+      <div class="titlebar-brand">
+        <img class="logo-img" src="../../assets/app.png" alt="" onerror="this.classList.add('hidden');this.nextElementSibling.classList.remove('hidden')">
+        <div class="logo-icon hidden">A</div>
+        <span class="app-name">Azure Agent Manager</span>
+      </div>
+      <div id="session-pill" class="session-pill hidden">
+        <span class="session-dot"></span>
+        <span id="session-name">Session</span>
+      </div>
+    </div>
+    <div class="titlebar-right">
+      <div id="token-badge" class="token-badge" title="Tokens (used when connecting to remote agents)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+        <span id="token-count">100</span>
+      </div>
+      <div class="titlebar-controls">
+        <button class="tb-btn" id="btn-min" title="Minimize">
+          <svg width="11" height="11" viewBox="0 0 12 12"><rect y="5.25" width="12" height="1.5" rx="0.5" fill="currentColor"/></svg>
+        </button>
+        <button class="tb-btn" id="btn-max" title="Maximize">
+          <svg width="11" height="11" viewBox="0 0 12 12"><rect x="1.5" y="1.5" width="9" height="9" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>
+        </button>
+        <button class="tb-btn close" id="btn-close" title="Close">
+          <svg width="11" height="11" viewBox="0 0 12 12"><path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Ollama Install Modal -->
+  <div id="ollama-modal" class="modal hidden">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card">
+      <div class="modal-icon warn">
+        <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M12 9v4M12 17h.01"/><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+        </svg>
+      </div>
+      <h2>Ollama is not installed</h2>
+      <p>Azure Agent Manager needs Ollama to run local models. Install it now?</p>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="ollama-cancel">Cancel</button>
+        <button class="btn btn-primary" id="ollama-install">
+          <span class="btn-label">Install Ollama</span>
+          <span class="btn-spinner hidden"></span>
+        </button>
+      </div>
+      <p class="modal-hint" id="ollama-hint"></p>
+    </div>
+  </div>
+
+  <!-- Create Project Modal -->
+  <div id="project-modal" class="modal hidden">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card wide">
+      <h2>New Project</h2>
+      <p>Name your project and choose its folder. The agent can read and edit files inside it.</p>
+      <div class="form-group">
+        <label>Project name</label>
+        <input type="text" id="project-name" placeholder="My Project" maxlength="80">
+      </div>
+      <div class="form-group">
+        <label>Folder</label>
+        <div class="folder-row">
+          <input type="text" id="project-folder" placeholder="C:\Projects\..." readonly>
+          <button class="btn btn-secondary" id="project-browse">Browse</button>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="project-cancel">Cancel</button>
+        <button class="btn btn-primary" id="project-create">Create Project</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pair Agent Modal -->
+  <div id="pair-modal" class="modal hidden">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card wide">
+      <h2>Pair remote agent</h2>
+      <p>Connect to another PC running Azure Agent Manager in server mode. You will use its GPU/CPU and spend tokens.</p>
+      <div class="form-group">
+        <label>Agent address</label>
+        <input type="text" id="pair-url" placeholder="http://192.168.1.10:7749">
+      </div>
+      <div id="pair-probe-result" class="pair-result hidden"></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="pair-cancel">Cancel</button>
+        <button class="btn btn-secondary" id="pair-probe">Test connection</button>
+        <button class="btn btn-primary" id="pair-add" disabled>Pair</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="app">
+    <!-- Sidebar -->
+    <aside id="sidebar">
+      <div class="sidebar-top">
+        <button class="new-chat-btn" id="btn-new-chat">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14M5 12h14"/></svg>
+          New chat
+        </button>
+        <div class="search-wrap">
+          <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          <input type="text" id="chat-search" placeholder="Search chats...">
+        </div>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="section-label">Projects</div>
+        <div id="project-list"></div>
+        <button class="sidebar-action" id="btn-new-project">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+          New project
+        </button>
+      </div>
+
+      <div class="sidebar-section flex-1">
+        <div class="section-label">Chats</div>
+        <div id="chat-list"></div>
+      </div>
+
+      <div class="sidebar-footer">
+        <button class="nav-btn" data-view="library" title="Model Library">
+          <!-- layers / library icon -->
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+        </button>
+        <button class="nav-btn" data-view="agents" title="Agents & Pairing">
+          <!-- network / nodes -->
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="5" cy="6" r="2.5"/><circle cx="19" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M7.2 7.5l3.5 8M16.8 7.5l-3.5 8M7.5 6h9"/></svg>
+        </button>
+        <button class="nav-btn" data-view="settings" title="Settings">
+          <!-- gear -->
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
+        <div class="user-pill">
+          <div class="avatar">A</div>
+          <span>Local</span>
+        </div>
+      </div>
+    </aside>
+
+    <main id="main">
+      <!-- Chat View -->
+      <div id="view-chat" class="view active">
+        <div id="messages" class="messages">
+          <div id="welcome" class="welcome">
+            <div class="welcome-logo">
+              <img class="logo-big-img" src="../../assets/app.png" alt="" onerror="this.classList.add('hidden');this.nextElementSibling.classList.remove('hidden')">
+              <div class="logo-big hidden">A</div>
+            </div>
+            <h1>Azure Agent Manager</h1>
+            <p class="welcome-sub">Local agents · remote pairing · projects</p>
+            <div class="suggestions">
+              <button class="suggestion" data-prompt="Explain how transformers work in simple terms">
+                <strong>Explain transformers</strong>
+                <span>in simple terms</span>
+              </button>
+              <button class="suggestion" data-prompt="Write a Python script to batch rename files">
+                <strong>Write a Python script</strong>
+                <span>to batch rename files</span>
+              </button>
+              <button class="suggestion" data-prompt="Summarize clean architecture principles">
+                <strong>Summarize a concept</strong>
+                <span>clean architecture</span>
+              </button>
+              <button class="suggestion" data-prompt="Give me 5 project ideas to practice backend development">
+                <strong>Project ideas</strong>
+                <span>backend practice</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div id="diff-panel" class="diff-panel hidden">
+          <div class="diff-header">
+            <span>Edited files</span>
+            <button class="icon-btn" id="diff-close" title="Close">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+          </div>
+          <div id="diff-list"></div>
+        </div>
+
+        <div class="input-area">
+          <div class="input-box">
+            <button class="input-icon-btn" id="btn-attach" title="Attach (coming soon)" disabled>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+            </button>
+            <textarea id="input" rows="1" placeholder="Message Azure Agent..."></textarea>
+            <div class="input-right">
+              <div class="model-select-wrap" id="model-picker">
+                <button type="button" class="model-picker-btn" id="model-picker-btn" title="Select model">
+                  <span class="model-icon" id="model-picker-icon"></span>
+                  <span class="model-picker-label" id="model-picker-label">Select model...</span>
+                  <svg class="model-chevron" width="10" height="6" viewBox="0 0 10 6"><path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg>
+                </button>
+                <div class="model-dropdown hidden" id="model-dropdown"></div>
+                <select id="model-select" class="sr-only" aria-hidden="true"><option value="">Select model...</option></select>
+              </div>
+              <button class="send-btn" id="btn-send" disabled title="Send">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+              </button>
+              <button class="cancel-btn hidden" id="btn-cancel" title="Stop generating">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="input-meta">
+            <span id="context-info">Local agent</span>
+            <span id="agent-indicator"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Library View -->
+      <div id="view-library" class="view">
+        <div class="view-header">
+          <h2>Model Library</h2>
+          <p>Download models for your local Ollama instance.</p>
+        </div>
+        <div class="library-tabs">
+          <button class="lib-tab active" data-tab="installed">Installed</button>
+          <button class="lib-tab" data-tab="popular">Popular</button>
+          <button class="lib-tab" data-tab="pull">Pull model</button>
+        </div>
+        <div id="lib-installed" class="lib-panel active"></div>
+        <div id="lib-popular" class="lib-panel"><div class="model-grid" id="popular-models"></div></div>
+        <div id="lib-pull" class="lib-panel">
+          <div class="pull-form">
+            <input type="text" id="pull-name" placeholder="e.g. llama3.2, qwen2.5:7b, mistral...">
+            <button class="btn btn-primary" id="btn-pull">Download</button>
+          </div>
+          <div id="pull-progress" class="pull-progress hidden"></div>
+        </div>
+      </div>
+
+      <!-- Agents / Pairing View -->
+      <div id="view-agents" class="view">
+        <div class="view-header">
+          <h2>Agents & Pairing</h2>
+          <p>Host your machine as an agent or connect to remote ones. Remote usage spends tokens.</p>
+        </div>
+        <div class="settings-sections">
+          <section class="settings-card">
+            <h3>Host this PC as an agent</h3>
+            <p class="hint">Other devices on the network can pair with your IP and use your models. Token regen for clients scales with this machine's power.</p>
+            <div class="form-row" style="margin-bottom:12px">
+              <button class="btn btn-primary" id="btn-toggle-server">Start agent server</button>
+              <span id="server-status" class="status-text">Stopped</span>
+            </div>
+            <div id="server-info" class="server-info hidden">
+              <div class="info-row"><span>Name</span><strong id="srv-name">—</strong></div>
+              <div class="info-row"><span>Port</span><strong id="srv-port">7749</strong></div>
+              <div class="info-row"><span>IPs</span><strong id="srv-ips">—</strong></div>
+              <div class="info-row"><span>Power score</span><strong id="srv-power">—</strong></div>
+              <div class="info-row"><span>Client regen</span><strong id="srv-regen">— tokens / 5 min</strong></div>
+            </div>
+            <div class="form-group" style="margin-top:14px">
+              <label>Agent display name</label>
+              <input type="text" id="agent-name-input" placeholder="My Gaming PC">
+            </div>
+            <div class="form-group">
+              <label>Port</label>
+              <input type="number" id="agent-port-input" value="7749" min="1024" max="65535">
+            </div>
+          </section>
+
+          <section class="settings-card">
+            <h3>Paired remote agents</h3>
+            <p class="hint">Connect to another Azure Agent Manager instance. Messages sent to a remote agent consume your tokens.</p>
+            <button class="btn btn-secondary" id="btn-open-pair" style="margin-bottom:12px">+ Pair agent</button>
+            <div id="paired-list"></div>
+          </section>
+
+          <section class="settings-card">
+            <h3>Your tokens</h3>
+            <p class="hint">Tokens are spent only when you use a <strong>remote</strong> agent. Local models are free. Tokens regenerate every 5 minutes based on the host machine power.</p>
+            <div class="token-display">
+              <div class="token-big" id="token-big">100</div>
+              <div class="token-cap">/ <span id="token-cap-label">100</span></div>
+            </div>
+            <div class="form-group">
+              <label>Token cap (max balance)</label>
+              <input type="number" id="token-cap-input" value="100" min="10" max="10000">
+            </div>
+            <button class="btn btn-secondary" id="btn-save-tokens">Save token settings</button>
+          </section>
+        </div>
+      </div>
+
+      <!-- Settings View -->
+      <div id="view-settings" class="view">
+        <div class="view-header"><h2>Settings</h2></div>
+        <div class="settings-sections">
+          <section class="settings-card">
+            <h3>Ollama</h3>
+            <div class="form-group">
+              <label>Ollama URL</label>
+              <input type="text" id="set-ollama-url" placeholder="http://127.0.0.1:11434">
+            </div>
+            <div class="form-group">
+              <label>Default model</label>
+              <select id="set-default-model"></select>
+            </div>
+            <div class="form-row">
+              <button class="btn btn-secondary" id="btn-check-ollama">Check connection</button>
+              <span id="ollama-status" class="status-text"></span>
+            </div>
+          </section>
+
+          <section class="settings-card">
+            <h3>Cloud AI (optional)</h3>
+            <p class="hint">OpenAI-compatible APIs for when you need cloud models.</p>
+            <div class="form-group">
+              <label>Provider</label>
+              <select id="set-cloud-provider">
+                <option value="openai">OpenAI</option>
+                <option value="groq">Groq</option>
+                <option value="together">Together AI</option>
+                <option value="custom">Custom endpoint</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>API Key</label>
+              <input type="password" id="set-cloud-key" placeholder="sk-...">
+            </div>
+          </section>
+
+          <section class="settings-card">
+            <h3>Appearance</h3>
+            <div class="form-group">
+              <label>Theme</label>
+              <select id="set-theme">
+                <option value="dark">Dark</option>
+                <option value="light">Light</option>
+                <option value="system">System</option>
+              </select>
+            </div>
+          </section>
+
+          <div class="settings-actions">
+            <button class="btn btn-primary" id="btn-save-settings">Save settings</button>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="js/app.js"></script>
+</body>
+</html>
